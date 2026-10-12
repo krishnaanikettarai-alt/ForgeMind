@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-ssr/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/
+# Previous nested scaffold kept locally; the canonical app is this folder.
+forgemind-signup/
