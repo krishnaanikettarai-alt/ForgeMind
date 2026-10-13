@@ -129,6 +129,16 @@ The assistant endpoint is intentionally a Phase 1 placeholder. It explicitly
 reports that the AMD-hosted model and ML predictor are not connected and does
 not generate predictions or diagnoses.
 
+## Historical ML baseline
+
+The separate `backend\ml\` module trains a reproducible, leakage-safe
+historical predictive-maintenance baseline from the `PdM_*` CSV files. Follow
+[`backend\ml\README.md`](ml/README.md) for setup, training, evaluation, and
+limitations. After training an artifact, `POST /api/historical/predict`
+accepts a numeric historical machine ID and telemetry history. Synthetic
+`M01`-`M20` machines remain a separate namespace and receive an explicit
+unsupported response.
+
 Analysis does not calculate a trained-model failure probability, health score,
 anomaly model, inventory result, supplier comparison, or downtime-cost
 estimate. Trend direction and threshold flags are derived only from the

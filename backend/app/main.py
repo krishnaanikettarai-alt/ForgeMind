@@ -17,6 +17,7 @@ from .data import (
     machine_sensor_readings,
     sensor_readings,
 )
+from backend.ml.predictor import HistoricalFailurePredictor, PredictionError
 
 
 DEFAULT_ORIGINS = {
@@ -46,6 +47,28 @@ class AssistantRequest(BaseModel):
         if not value:
             raise ValueError("must not be blank")
         return value
+
+
+class HistoricalPredictionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    machine_id: int | str
+    telemetry_history: list[dict[str, Any]] = Field(min_length=1)
+
+
+def historical_predictor() -> HistoricalFailurePredictor:
+    artifact = os.getenv(
+        "FORGEMIND_ML_ARTIFACT",
+        str(
+            os.path.join(
+                os.path.dirname(os.path.dirname(__file__)),
+                "ml",
+                "artifacts",
+                "historical_failure_baseline.joblib",
+            )
+        ),
+    )
+    return HistoricalFailurePredictor(artifact)
 
 
 app = FastAPI(title="ForgeMind Backend", version="0.1.0")
@@ -134,3 +157,15 @@ def assistant(request: AssistantRequest) -> dict[str, str]:
             "data for the next integration phase."
         )
     }
+
+
+@app.post("/api/historical/predict")
+def historical_prediction(request: HistoricalPredictionRequest) -> dict[str, Any]:
+    try:
+        return historical_predictor().predict(
+            request.machine_id, request.telemetry_history
+        ).as_dict()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except PredictionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
