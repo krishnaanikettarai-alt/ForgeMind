@@ -142,3 +142,41 @@ def test_analysis_endpoint_and_invalid_machine_id() -> None:
 def test_analysis_endpoint_rejects_invalid_bounds() -> None:
     assert client.get("/api/machines/M01/analysis?limit=0").status_code == 422
     assert client.get("/api/machines/M01/analysis?window=101").status_code == 422
+
+
+def test_decisions_endpoint_returns_maintenance_options() -> None:
+    response = client.get("/api/decisions")
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["data_status"] == "synthetic_demo"
+    assert payload["part_id"] == "BR-204"
+    assert payload["currency"] == "INR"
+
+    option_names = {option["name"] for option in payload["options"]}
+    assert option_names == {
+        "immediate_replacement",
+        "scheduled_replacement",
+        "continue_monitoring",
+    }
+
+
+
+def test_decisions_endpoint_discloses_cost_limitations() -> None:
+    payload = client.get("/api/decisions").json()
+
+    assert payload["decision_status"] == "provisional"
+    assert payload["recommended_option"] is None
+    assert payload["lowest_immediate_cost_option"] == "continue_monitoring"
+    assert payload["risk_assessment"] == "unknown"
+    assert payload["requires_human_approval"] is True
+    assert any("not quantified" in item for item in payload["assumptions"])
+
+
+def test_decisions_endpoint_costs_are_consistent() -> None:
+    payload = client.get("/api/decisions").json()
+
+    for option in payload["options"]:
+        assert option["total_cost_inr"] == round(
+            option["part_cost_inr"] + option["downtime_cost_inr"], 2
+        )

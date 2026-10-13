@@ -1,4 +1,4 @@
-"""ForgeMind Phase 1 backend API."""
+"""ForgeMind backend API."""
 
 from __future__ import annotations
 
@@ -17,7 +17,16 @@ from .data import (
     machine_sensor_readings,
     sensor_readings,
 )
-from backend.ml.predictor import HistoricalFailurePredictor, PredictionError
+from .decision import evaluate_options
+
+try:
+    # Supports launching with: uvicorn backend.app.main:app (repo root)
+    from backend.ml.predictor import HistoricalFailurePredictor, PredictionError
+except ModuleNotFoundError as exc:
+    if exc.name != "backend":
+        raise
+    # Supports launching with: uvicorn app.main:app (backend directory)
+    from ml.predictor import HistoricalFailurePredictor, PredictionError
 
 
 DEFAULT_ORIGINS = {
@@ -59,19 +68,18 @@ class HistoricalPredictionRequest(BaseModel):
 def historical_predictor() -> HistoricalFailurePredictor:
     artifact = os.getenv(
         "FORGEMIND_ML_ARTIFACT",
-        str(
-            os.path.join(
-                os.path.dirname(os.path.dirname(__file__)),
-                "ml",
-                "artifacts",
-                "historical_failure_baseline.joblib",
-            )
+        os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "ml",
+            "artifacts",
+            "historical_failure_baseline.joblib",
         ),
     )
     return HistoricalFailurePredictor(artifact)
 
 
 app = FastAPI(title="ForgeMind Backend", version="0.1.0")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins(),
@@ -160,12 +168,27 @@ def assistant(request: AssistantRequest) -> dict[str, str]:
 
 
 @app.post("/api/historical/predict")
-def historical_prediction(request: HistoricalPredictionRequest) -> dict[str, Any]:
+def historical_prediction(
+    request: HistoricalPredictionRequest,
+) -> dict[str, Any]:
     try:
         return historical_predictor().predict(
-            request.machine_id, request.telemetry_history
+            request.machine_id,
+            request.telemetry_history,
         ).as_dict()
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except PredictionError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/decisions")
+def maintenance_decision() -> dict[str, Any]:
+    """Return a provisional maintenance comparison using synthetic demo data."""
+    try:
+        return evaluate_options()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Maintenance decision calculation failed.",
+        ) from exc
