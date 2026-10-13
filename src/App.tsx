@@ -79,6 +79,38 @@ type SensorAnalysis = {
 };
 type AnalysisState = { status: "loading" | "ready" | "unavailable"; data?: SensorAnalysis; error?: string };
 
+type DecisionOption = {
+  name: string;
+  part_cost_inr: number;
+  downtime_hours: number;
+  downtime_cost_inr: number;
+  total_cost_inr: number;
+  lead_time_days: number;
+  stock_available: boolean;
+  trade_off: string;
+};
+
+type DecisionData = {
+  data_status: string;
+  part_id: string;
+  currency: string;
+  decision_status: string;
+  recommendation_basis: string;
+  recommended_option: string | null;
+  lowest_immediate_cost_option: string;
+  risk_assessment: string;
+  requires_human_approval: boolean;
+  decision_explanation: string;
+  options: DecisionOption[];
+  assumptions: string[];
+};
+
+type DecisionState = {
+  status: "loading" | "ready" | "unavailable";
+  data?: DecisionData;
+  error?: string;
+};
+
 const dataFiles = [
   { name: "sensor_readings.csv", label: "Condition sensor samples", rows: "100,000", detail: "20 assets · minute-level vibration, temperature, and current", size: "7.7 MB" },
   { name: "PdM_machines.csv", label: "Machine registry", rows: "100", detail: "Model and age metadata for each machine", size: "1.5 KB" },
@@ -173,6 +205,9 @@ function App() {
   const [notice, setNotice] = useState("");
   const [apiMode, setApiMode] = useState(import.meta.env.VITE_AGENT_API_URL ? "Local API configured" : "Demo data");
   const [analysis, setAnalysis] = useState<AnalysisState>({ status: import.meta.env.VITE_AGENT_API_URL ? "loading" : "unavailable", error: "Configure VITE_AGENT_API_URL to load backend analysis." });
+  const [decisions, setDecisions] = useState<DecisionState>({
+  status: "loading",
+});
   const currentMachine = machines.find((machine) => machine.id === selectedMachine) ?? machines[3];
   const apiBase = (import.meta.env.VITE_AGENT_API_URL as string | undefined)?.replace(/\/$/, "");
   const filteredMachines = useMemo(() => machines.filter((machine) => (filter === "All" || machine.status === filter) && `${machine.id} ${machine.name} ${machine.type}`.toLowerCase().includes(query.toLowerCase())), [filter, query]);
@@ -207,6 +242,26 @@ function App() {
       });
     return () => controller.abort();
   }, [apiBase, selectedMachine]);
+
+  useEffect(() => {
+    if (!apiBase) {
+      setDecisions({ status: "unavailable", error: "Configure VITE_AGENT_API_URL to load maintenance decisions." });
+      return;
+    }
+    const controller = new AbortController();
+    setDecisions({ status: "loading" });
+    fetch(`${apiBase}/api/decisions`, { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`Decision request failed (${response.status})`);
+        return response.json() as Promise<DecisionData>;
+      })
+      .then((data) => setDecisions({ status: "ready", data }))
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setDecisions({ status: "unavailable", error: "Maintenance decisions are unavailable. Check that the backend is running." });
+      });
+    return () => controller.abort();
+  }, [apiBase]);
 
   const openMachine = (id: string) => { setSelectedMachine(id); setPage("Machine detail"); };
   const showNotice = (text: string) => { setNotice(text); window.setTimeout(() => setNotice(""), 3200); };
@@ -252,7 +307,7 @@ function App() {
         {page === "Machines" && <MachinesPage filtered={filteredMachines} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} onOpen={openMachine}/>}
         {page === "Machine detail" && <MachineDetail machine={currentMachine} sensor={sensorAssets[currentMachine.id]} analysis={analysis} onAction={showNotice} onNavigate={setPage}/>}
         {page === "Predictions" && <Predictions onOpen={openMachine}/>}
-        {page === "Maintenance" && <MaintenancePage onAction={showNotice}/>}
+        {page === "Maintenance" && <MaintenancePage onAction={showNotice} decisions={decisions}/>}
         {page === "Assistant" && <AssistantPage chat={chat} message={message} setMessage={setMessage} machine={currentMachine} analysis={analysis} onSend={sendMessage} onSchedule={() => showNotice(`Maintenance request created for ${currentMachine.id} · proposed window: next 48 hours.`)}/>}
         {page === "Data sources" && <DataSourcesPage sensorCount={Object.keys(sensorAssets).length} datasetState={datasetState}/>}
       </main>
@@ -305,8 +360,92 @@ function Predictions({ onOpen }: { onOpen: (id: string) => void }) {
   return <><PageHeading eyebrow="Predictive analytics" title="Failure predictions" subtitle="Prioritized machine risks with explainable contributing factors." action={<button className="outline-button"><Clock3 size={14}/>Next 7 days<ChevronDown size={13}/></button>}/><div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.35fr_.65fr]"><section className="panel"><div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">Priority queue</h2><p className="mt-1 text-[11px] text-slate-500">Machines ranked by probability and impact</p></div><span className="rounded-full bg-rose-400/10 px-2.5 py-1 text-[10px] font-semibold text-rose-300">3 require action</span></div><div className="divide-y divide-white/[0.055]">{machines.filter((m) => m.probability > 50).sort((a,b) => b.probability-a.probability).map((m) => <button key={m.id} onClick={() => onOpen(m.id)} className="risk-row"><div className="risk-score"><span>{m.probability}</span><small>%</small></div><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className="text-xs font-semibold text-white">{m.id} · {m.name}</span><StatusPill status={m.status}/></div><p className="mt-1.5 text-[10px] text-slate-500">{m.id === "M17" ? "Motor bearing · estimated failure in ~2 days" : "Drive assembly · estimated failure within 5 days"}</p><div className="mt-3 h-1 overflow-hidden rounded-full bg-white/[0.07]"><div className="h-full rounded-full bg-rose-400" style={{width:`${m.probability}%`}}/></div></div><ArrowUpRight className="ml-2 size-4 shrink-0 text-slate-600"/></button>)}</div></section><section className="panel"><div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">M17 risk factors</h2><p className="mt-1 text-[11px] text-slate-500">Model contribution summary</p></div><span className="text-[10px] text-slate-600">91% risk</span></div><div className="space-y-5 px-5 pb-5">{[{label:"Vibration trend",value:92,tone:"bg-rose-300"},{label:"Temperature rise",value:84,tone:"bg-rose-300"},{label:"Motor current",value:78,tone:"bg-amber-300"},{label:"Maintenance age",value:72,tone:"bg-amber-300"},{label:"Recent errors",value:48,tone:"bg-sky-300"}].map((factor) => <div key={factor.label}><div className="mb-2 flex justify-between text-[11px]"><span className="text-slate-400">{factor.label}</span><span className="font-medium text-slate-300">{factor.value >= 70 ? "HIGH" : "MEDIUM"}</span></div><div className="h-1.5 rounded-full bg-white/[0.06]"><div className={`h-full rounded-full ${factor.tone}`} style={{width:`${factor.value}%`}}/></div></div>)}<div className="rounded-xl border border-white/[0.06] bg-white/[0.025] p-3 text-[10px] leading-relaxed text-slate-500"><ShieldCheck size={13} className="mr-1 inline text-emerald-300"/>Predictions are estimates. Verify with an inspection before taking a machine offline.</div></div></section></div><div className="mt-4"><section className="panel"><div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">Recent model runs</h2><p className="mt-1 text-[11px] text-slate-500">Latest scored assets</p></div><button className="icon-link" aria-label="Prediction settings"><Settings2 size={15}/></button></div><div className="overflow-x-auto"><table className="data-table"><thead><tr><th>Machine</th><th>Predicted component</th><th>Probability</th><th>Failure window</th><th>Last scored</th></tr></thead><tbody><tr onClick={() => onOpen("M17")} className="cursor-pointer"><td className="font-semibold text-slate-200">M17 · Compressor</td><td>Motor bearing</td><td className="font-semibold text-rose-300">91%</td><td>~2 days</td><td>8 minutes ago</td></tr><tr onClick={() => onOpen("M42")} className="cursor-pointer"><td className="font-semibold text-slate-200">M42 · Pump</td><td>Drive coupling</td><td className="font-semibold text-amber-300">73%</td><td>~5 days</td><td>12 minutes ago</td></tr><tr onClick={() => onOpen("M63")} className="cursor-pointer"><td className="font-semibold text-slate-200">M63 · Motor</td><td>Rotor assembly</td><td className="font-semibold text-amber-300">61%</td><td>~6 days</td><td>21 minutes ago</td></tr></tbody></table></div></section></div></>;
 }
 
-function MaintenancePage({ onAction }: { onAction: (text: string) => void }) {
-  return <><PageHeading eyebrow="Reliability operations" title="Maintenance & inventory" subtitle="Plan the next intervention with parts, suppliers, and production impact in view." action={<button className="primary-button" onClick={() => onAction("Maintenance request created for M17.")}><CalendarDays size={14}/>Schedule maintenance</button>}/><div className="grid grid-cols-2 gap-3 xl:grid-cols-4"><MetricCard label="M17 maintenance spend" value="$2,450" detail="Lifetime recorded cost" icon={Wrench}/><MetricCard label="Downtime recorded" value="18 hrs" detail="Across 4 service events" icon={Clock3} tone="amber"/><MetricCard label="Bearing stock" value="4 units" detail="Reorder threshold · 3" icon={Package} tone="green"/><MetricCard label="Supplier lead time" value="4 days" detail="Industrial Parts Ltd." icon={Factory}/></div><div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[1.05fr_.95fr]"><section className="panel"><div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">M17 maintenance history</h2><p className="mt-1 text-[11px] text-slate-500">Industrial compressor · service record</p></div><button className="outline-button" onClick={() => onAction("Maintenance history exported.")}>Export<ArrowUpRight size={13}/></button></div><div className="relative px-5 pb-5"><div className="timeline-line"/>{history.map(({date,kind,note,icon:Icon}) => <div className="timeline-item" key={date}><span className="timeline-icon"><Icon size={14}/></span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center justify-between gap-1"><p className="text-xs font-medium text-slate-200">{kind}</p><time className="text-[10px] text-slate-600">{date}</time></div><p className="mt-1 text-[11px] text-slate-500">{note}</p></div></div>)}</div></section><div className="space-y-4"><section className="panel"><div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">Required part</h2><p className="mt-1 text-[11px] text-slate-500">Recommended for predicted repair</p></div><span className="rounded-full bg-emerald-400/10 px-2.5 py-1 text-[10px] font-medium text-emerald-300">In stock</span></div><div className="px-5 pb-5"><div className="flex items-center gap-3"><div className="part-icon"><Package size={20}/></div><div><p className="text-sm font-semibold text-white">Motor Bearing</p><p className="mt-1 text-[10px] text-slate-500">Part BRG-6205 · Industrial grade</p></div></div><div className="mt-4 grid grid-cols-2 gap-3">{[["Available","4 units"],["Reorder level","3 units"],["Supplier","Industrial Parts Ltd."],["Lead time","4 days"],["Unit price","$85.00"],["Reliability","96%"]].map(([k,v]) => <div key={k} className="rounded-lg bg-white/[0.025] p-3"><p className="text-[9px] uppercase tracking-wider text-slate-600">{k}</p><p className="mt-1.5 text-xs font-medium text-slate-300">{v}</p></div>)}</div><div className="mt-4 grid grid-cols-2 gap-2"><button className="primary-button justify-center" onClick={() => onAction("Maintenance scheduled for M17 within 48 hours.")}><CalendarDays size={14}/>Schedule</button><button className="outline-button justify-center" onClick={() => onAction("Purchase order draft created for 2 × BRG-6205.")}><Package size={14}/>Order part</button></div></div></section><section className="panel p-5"><div className="flex items-center gap-2"><Zap size={15} className="text-amber-300"/><h2 className="text-sm font-semibold text-white">Production economics</h2></div><div className="mt-4 grid grid-cols-2 gap-4"><div><p className="text-[10px] text-slate-500">Production rate</p><p className="mt-1 text-sm font-medium text-slate-200">120 units / hr</p></div><div><p className="text-[10px] text-slate-500">Downtime cost</p><p className="mt-1 text-sm font-medium text-slate-200">$2,200 / hr</p></div></div><div className="mt-4 rounded-xl border border-rose-400/15 bg-rose-400/[0.055] p-4"><div className="flex items-center justify-between"><span className="text-xs text-slate-400">Failure exposure · ~18h downtime</span><span className="text-lg font-semibold text-rose-300">$39,600+</span></div><div className="my-3 h-px bg-white/[0.07]"/><div className="flex items-center justify-between"><span className="text-xs text-slate-400">Planned repair estimate</span><span className="text-sm font-semibold text-emerald-300">$2,450</span></div></div></section></div></div></>;
+function MaintenancePage({ onAction, decisions }: { onAction: (text: string) => void; decisions: DecisionState }) {
+  const formatINR = (amount: number) => new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    maximumFractionDigits: 0,
+  }).format(amount);
+
+  const optionLabels: Record<string, string> = {
+    immediate_replacement: "Immediate replacement",
+    scheduled_replacement: "Scheduled replacement",
+    continue_monitoring: "Continue monitoring",
+  };
+
+  return <>
+    <PageHeading
+      eyebrow="Reliability operations"
+      title="Maintenance & inventory"
+      subtitle="Compare maintenance options, costs, and operational trade-offs."
+      action={<button className="primary-button" onClick={() => onAction("Maintenance review requested. Human approval is required.")}><CalendarDays size={14}/>Request review</button>}
+    />
+
+    <section className="panel mb-4 overflow-hidden">
+      <div className="panel-heading">
+        <div>
+          <h2 className="text-sm font-semibold text-white">Maintenance decision analysis</h2>
+          <p className="mt-1 text-[11px] text-slate-500">Part {decisions.data?.part_id ?? "BR-204"} · Cost comparison</p>
+        </div>
+        <span className="rounded-full bg-amber-400/10 px-2.5 py-1 text-[10px] font-semibold text-amber-300">Provisional</span>
+      </div>
+
+      {decisions.status === "loading" && <p className="px-5 pb-5 text-xs text-slate-400">Loading decision options from the backend…</p>}
+      {decisions.status === "unavailable" && <div className="px-5 pb-5 text-xs text-rose-300">{decisions.error ?? "Decision data unavailable."}</div>}
+
+      {decisions.status === "ready" && decisions.data && <div className="space-y-4 px-5 pb-5">
+        <div className="rounded-xl border border-amber-300/15 bg-amber-300/[0.045] p-4">
+          <div className="flex items-center gap-2 text-amber-200"><CircleAlert size={16}/><span className="text-xs font-semibold">No operational recommendation selected</span></div>
+          <p className="mt-2 text-xs leading-relaxed text-slate-400">{decisions.data?.decision_explanation}</p>
+          <p className="mt-2 text-[10px] text-slate-500">Data status: {decisions.data?.data_status} · Failure risk: {decisions.data.risk_assessment}</p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+          {decisions.data?.options.map((option) => <article key={option.name} className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+            <p className="text-xs font-semibold text-white">{optionLabels[option.name] ?? option.name}</p>
+            <p className="mt-3 text-2xl font-semibold tracking-tight text-white">{formatINR(option.total_cost_inr)}</p>
+            <p className="mt-1 text-[10px] text-slate-500">Estimated immediate cost</p>
+            <div className="my-4 h-px bg-white/[0.07]"/>
+            <div className="space-y-3 text-xs">
+              <div className="flex justify-between gap-3"><span className="text-slate-500">Part cost</span><span className="text-slate-300">{formatINR(option.part_cost_inr)}</span></div>
+              <div className="flex justify-between gap-3"><span className="text-slate-500">Downtime cost</span><span className="text-slate-300">{formatINR(option.downtime_cost_inr)}</span></div>
+              <div className="flex justify-between gap-3"><span className="text-slate-500">Downtime</span><span className="text-slate-300">{option.downtime_hours} hours</span></div>
+              <div className="flex justify-between gap-3"><span className="text-slate-500">Lead time</span><span className="text-slate-300">{option.lead_time_days === 0 ? "Immediate" : `${option.lead_time_days} days`}</span></div>
+              <div className="flex justify-between gap-3"><span className="text-slate-500">Stock available</span><span className="text-slate-300">{option.stock_available ? "Yes" : "No"}</span></div>
+            </div>
+            <p className="mt-4 text-[11px] leading-relaxed text-slate-400">{option.trade_off}</p>
+            {option.name === decisions.data?.lowest_immediate_cost_option && <p className="mt-3 rounded-lg bg-sky-400/10 px-3 py-2 text-[10px] text-sky-200">Lowest immediate cost only — not a safety recommendation.</p>}
+          </article>)}
+        </div>
+
+        <div className="rounded-xl border border-rose-300/15 bg-rose-300/[0.035] p-4">
+          <div className="flex items-center gap-2 text-rose-200"><ShieldCheck size={15}/><p className="text-xs font-semibold">Human approval required</p></div>
+          <p className="mt-2 text-[11px] leading-relaxed text-slate-400">{decisions.data.requires_human_approval ? "No maintenance or procurement action is automatically approved. A qualified person must review the options." : "Check the backend approval policy before taking action."}</p>
+        </div>
+
+        <details className="rounded-xl border border-white/[0.07] p-4">
+          <summary className="cursor-pointer text-xs font-medium text-slate-300">Demo assumptions and limitations</summary>
+          <ul className="mt-3 list-disc space-y-2 pl-5 text-[10px] leading-relaxed text-slate-500">{decisions.data.assumptions.map((assumption) => <li key={assumption}>{assumption}</li>)}</ul>
+        </details>
+      </div>}
+    </section>
+
+    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.05fr_.95fr]">
+      <section className="panel">
+        <div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">M17 maintenance history</h2><p className="mt-1 text-[11px] text-slate-500">Industrial compressor · sample service record</p></div><button className="outline-button" onClick={() => onAction("Maintenance history export requested.")}>Export<ArrowUpRight size={13}/></button></div>
+        <div className="relative px-5 pb-5"><div className="timeline-line"/>{history.map(({date,kind,note,icon:Icon}) => <div className="timeline-item" key={date}><span className="timeline-icon"><Icon size={14}/></span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center justify-between gap-1"><p className="text-xs font-medium text-slate-200">{kind}</p><time className="text-[10px] text-slate-600">{date}</time></div><p className="mt-1 text-[11px] text-slate-500">{note}</p></div></div>)}</div>
+      </section>
+      <section className="panel p-5">
+        <div className="flex items-center gap-2"><Zap size={15} className="text-amber-300"/><h2 className="text-sm font-semibold text-white">Decision constraints</h2></div>
+        <div className="mt-4 space-y-3 text-xs leading-relaxed text-slate-400">
+          <p>Cost estimates are synthetic demo values in Indian rupees (INR).</p>
+          <p>Monitoring's immediate cost excludes future repairs, production losses, and unquantified failure risk.</p>
+          <p>Supplier lead time and waiting-related operational risk have not been validated.</p>
+          <p className="text-amber-200">Use these options for demonstration only. They are not approved maintenance instructions.</p>
+        </div>
+      </section>
+    </div>
+  </>;
 }
 
 function DataSourcesPage({ sensorCount, datasetState }: { sensorCount: number; datasetState: "loading" | "ready" | "unavailable" }) {
