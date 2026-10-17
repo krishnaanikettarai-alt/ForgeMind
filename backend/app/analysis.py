@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -45,6 +46,8 @@ def _threshold(name: str) -> float:
         raise ValueError(
             f"FORGEMIND_THRESHOLD_{name.upper()} must be a number"
         ) from exc
+    if not math.isfinite(value):
+        raise ValueError(f"FORGEMIND_THRESHOLD_{name.upper()} must be finite")
     if value < 0:
         raise ValueError(f"FORGEMIND_THRESHOLD_{name.upper()} must be non-negative")
     return value

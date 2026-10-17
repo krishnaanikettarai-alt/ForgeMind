@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import os
+from datetime import datetime
+from functools import lru_cache
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, field_validator
 
 from .agent import run_maintenance_agent
 from .analysis import analyze_readings, threshold_config
@@ -62,12 +65,43 @@ class AssistantRequest(BaseModel):
             raise ValueError("must not be blank")
         return value
 
+    @field_validator("context")
+    @classmethod
+    def bound_context(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is not None:
+            try:
+                encoded = json.dumps(value, allow_nan=False, separators=(",", ":"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("context must contain valid JSON values") from exc
+            if len(encoded.encode("utf-8")) > 16_000:
+                raise ValueError("context must be no larger than 16000 bytes")
+        return value
+
+
+class HistoricalTelemetry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    datetime: datetime
+    machineID: int = Field(ge=1)
+    volt: FiniteFloat
+    rotate: FiniteFloat
+    pressure: FiniteFloat
+    vibration: FiniteFloat
+
 
 class HistoricalPredictionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     machine_id: int | str
-    telemetry_history: list[dict[str, Any]] = Field(min_length=1)
+    telemetry_history: list[HistoricalTelemetry] = Field(
+        min_length=1,
+        max_length=2000,
+    )
+
+
+@lru_cache(maxsize=1)
+def _load_historical_predictor(artifact: str) -> HistoricalFailurePredictor:
+    return HistoricalFailurePredictor(artifact)
 
 
 def historical_predictor() -> HistoricalFailurePredictor:
@@ -80,7 +114,7 @@ def historical_predictor() -> HistoricalFailurePredictor:
             "historical_failure_baseline.joblib",
         ),
     )
-    return HistoricalFailurePredictor(artifact)
+    return _load_historical_predictor(os.path.abspath(artifact))
 
 
 app = FastAPI(title="ForgeMind Backend", version="0.1.0")
@@ -167,10 +201,13 @@ def assistant(request: AssistantRequest) -> dict[str, Any]:
     try:
         ensure_machine_id(request.machineId)
 
-        return run_maintenance_agent(
-            message=request.message,
-            machine_id=request.machineId,
-        )
+        agent_args: dict[str, Any] = {
+            "message": request.message,
+            "machine_id": request.machineId,
+        }
+        if request.context is not None:
+            agent_args["context"] = request.context
+        return run_maintenance_agent(**agent_args)
 
     except HTTPException:
         raise
@@ -189,7 +226,7 @@ def historical_prediction(
     try:
         return historical_predictor().predict(
             request.machine_id,
-            request.telemetry_history,
+            [record.model_dump() for record in request.telemetry_history],
         ).as_dict()
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

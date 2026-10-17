@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import csv
+import math
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
@@ -56,11 +57,16 @@ def dataset_path() -> Path:
     return base / "sensor_readings.csv"
 
 
-def _parse_timestamp(value: str) -> None:
+def _parse_timestamp(value: str) -> datetime:
     try:
-        datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise DataUnavailableError(f"Invalid sensor timestamp: {value}") from exc
+    # Treat timezone-naive dataset timestamps as UTC so all rows can be
+    # compared consistently, including datasets that mix timestamp formats.
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 @lru_cache(maxsize=1)
@@ -76,7 +82,7 @@ def _load_readings() -> tuple[SensorReading, ...]:
                 raise DataUnavailableError(
                     "Synthetic sensor dataset has an unexpected schema"
                 )
-            readings = []
+            readings_with_time: list[tuple[datetime, SensorReading]] = []
             for line_number, row in enumerate(reader, start=2):
                 machine_id = (row.get("machine_id") or "").strip()
                 timestamp = (row.get("timestamp") or "").strip()
@@ -88,16 +94,21 @@ def _load_readings() -> tuple[SensorReading, ...]:
                     raise DataUnavailableError(
                         "Synthetic machine IDs must use the M-prefixed namespace"
                     )
-                _parse_timestamp(timestamp)
+                parsed_timestamp = _parse_timestamp(timestamp)
                 try:
-                    readings.append(
-                        SensorReading(
+                    values = {
+                        "vibration_mm_s": float(row["vibration_mm_s"]),
+                        "temperature_c": float(row["temperature_c"]),
+                        "current_a": float(row["current_a"]),
+                    }
+                    if not all(math.isfinite(value) for value in values.values()):
+                        raise ValueError("Sensor values must be finite")
+                    readings_with_time.append(
+                        (parsed_timestamp, SensorReading(
                             machine_id=machine_id,
                             timestamp=timestamp,
-                            vibration_mm_s=float(row["vibration_mm_s"]),
-                            temperature_c=float(row["temperature_c"]),
-                            current_a=float(row["current_a"]),
-                        )
+                            **values,
+                        ))
                     )
                 except (TypeError, ValueError) as exc:
                     raise DataUnavailableError(
@@ -108,9 +119,10 @@ def _load_readings() -> tuple[SensorReading, ...]:
             f"Unable to read synthetic sensor dataset: {path}"
         ) from exc
 
-    if not readings:
+    if not readings_with_time:
         raise DataUnavailableError("Synthetic sensor dataset is empty")
-    return tuple(readings)
+    readings_with_time.sort(key=lambda item: (item[1].machine_id, item[0]))
+    return tuple(reading for _, reading in readings_with_time)
 
 
 def clear_cache() -> None:

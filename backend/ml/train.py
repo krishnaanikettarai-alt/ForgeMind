@@ -24,7 +24,16 @@ def train(
     telemetry, failures = load_historical_data(dataset_dir)
     frame = make_training_frame(telemetry, failures, rolling_window, horizon_hours)
     names = feature_columns(frame)
-    split = chronological_split(frame, test_fraction)
+    split = chronological_split(
+        frame,
+        test_fraction=test_fraction,
+        horizon_hours=horizon_hours,
+    )
+    if split.train["target"].nunique() < 2:
+        raise ValueError(
+            "Training period contains only one target class after the time purge; "
+            "use more history or a different evaluation period."
+        )
     model = make_pipeline()
     model.fit(split.train[names], split.train["target"])
     metrics = evaluate(model, split.test, names)
@@ -32,13 +41,21 @@ def train(
         "model_version": "historical-logistic-v1",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "feature_names": names,
-        "target_definition": "Recorded failure for the same numeric machine strictly after and within 24 hours of telemetry timestamp.",
+        "target_definition": (
+            "Recorded failure for the same numeric machine strictly after and "
+            f"within {horizon_hours} hours of telemetry timestamp."
+        ),
         "horizon_hours": horizon_hours,
         "rolling_window": rolling_window,
         "minimum_history": 2,
         "training_date_range": [split.train["datetime"].min().isoformat(), split.train["datetime"].max().isoformat()],
         "test_date_range": [split.test["datetime"].min().isoformat(), split.test["datetime"].max().isoformat()],
-        "split": {"test_fraction": test_fraction, "train_end": split.train_end, "test_start": split.test_start},
+        "split": {
+            "test_fraction": test_fraction,
+            "label_window_purge_hours": horizon_hours,
+            "train_end": split.train_end,
+            "test_start": split.test_start,
+        },
         "class_counts": {
             "train": {str(int(k)): int(v) for k, v in split.train["target"].value_counts().sort_index().items()},
             "test": metrics["class_counts"],

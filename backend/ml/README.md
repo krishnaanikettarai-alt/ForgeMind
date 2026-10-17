@@ -24,7 +24,9 @@ From the repository root:
 The command sorts telemetry by machine and timestamp, creates current sensor
 values plus past-only rolling means, standard deviations, and first differences,
 then labels a telemetry row positive when a failure for that same numeric machine
-occurs strictly after the timestamp and no later than 24 hours afterward.
+occurs strictly after the timestamp and no later than 24 hours afterward. The
+chronological holdout purges the final 24 hours of training rows so their label
+windows cannot use failures from the held-out period.
 The model is a class-weighted logistic-regression pipeline with scaling. The
 split is chronological (a timestamp boundary targets a later 20% time period;
 one timestamp is never split), never random. JSON output reports the exact date

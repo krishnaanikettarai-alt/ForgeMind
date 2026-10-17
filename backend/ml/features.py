@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+from bisect import bisect_right
 from datetime import timedelta
 from typing import Iterable
 
@@ -18,9 +20,23 @@ def _normalise_telemetry(telemetry: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Telemetry is missing columns: {sorted(missing)}")
     frame = telemetry[TELEMETRY_COLUMNS].copy()
     frame["datetime"] = pd.to_datetime(frame["datetime"], errors="raise")
-    frame["machineID"] = pd.to_numeric(frame["machineID"], errors="raise").astype(int)
+    machine_ids = pd.to_numeric(frame["machineID"], errors="raise")
+    if (
+        machine_ids.isna().any()
+        or not machine_ids.map(math.isfinite).all()
+        or (machine_ids < 1).any()
+        or (machine_ids % 1 != 0).any()
+    ):
+        raise ValueError("machineID values must be positive integers")
+    frame["machineID"] = machine_ids.astype(int)
     for column in VALUE_COLUMNS:
         frame[column] = pd.to_numeric(frame[column], errors="raise")
+        if not frame[column].map(math.isfinite).all():
+            raise ValueError(f"{column} values must be finite numbers")
+    if frame["datetime"].isna().any():
+        raise ValueError("datetime values must not be missing")
+    if frame.duplicated(["machineID", "datetime"]).any():
+        raise ValueError("Telemetry must not contain duplicate machine timestamps")
     return frame.sort_values(["machineID", "datetime"], kind="mergesort").reset_index(drop=True)
 
 
@@ -59,18 +75,34 @@ def build_labels(
         raise ValueError("Failures must contain datetime and machineID columns")
     failure_frame = failures[["datetime", "machineID"]].copy()
     failure_frame["datetime"] = pd.to_datetime(failure_frame["datetime"], errors="raise")
-    failure_frame["machineID"] = pd.to_numeric(
+    failure_machine_ids = pd.to_numeric(
         failure_frame["machineID"], errors="raise"
-    ).astype(int)
+    )
+    if (
+        failure_machine_ids.isna().any()
+        or not failure_machine_ids.map(math.isfinite).all()
+        or (failure_machine_ids < 1).any()
+        or (failure_machine_ids % 1 != 0).any()
+    ):
+        raise ValueError("Failure machineID values must be positive integers")
+    if failure_frame["datetime"].isna().any():
+        raise ValueError("Failure datetime values must not be missing")
+    failure_frame["machineID"] = failure_machine_ids.astype(int)
     failure_times = {
-        machine: values.to_list()
+        machine: sorted(values.to_list())
         for machine, values in failure_frame.groupby("machineID")["datetime"]
     }
     horizon = timedelta(hours=horizon_hours)
-    labels = [
-        int(any(timestamp < failure <= timestamp + horizon for failure in failure_times.get(machine, [])))
-        for machine, timestamp in zip(frame["machineID"], frame["datetime"])
-    ]
+    labels = []
+    for machine, timestamp in zip(frame["machineID"], frame["datetime"]):
+        machine_failures = failure_times.get(machine, [])
+        next_failure = bisect_right(machine_failures, timestamp)
+        labels.append(
+            int(
+                next_failure < len(machine_failures)
+                and machine_failures[next_failure] <= timestamp + horizon
+            )
+        )
     return pd.Series(labels, index=frame.index, name="target", dtype="int8")
 
 

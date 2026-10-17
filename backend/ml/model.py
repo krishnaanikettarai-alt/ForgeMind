@@ -21,16 +21,27 @@ class Split:
     test_end: str
 
 
-def chronological_split(frame: pd.DataFrame, test_fraction: float = 0.2) -> Split:
+def chronological_split(
+    frame: pd.DataFrame,
+    test_fraction: float = 0.2,
+    horizon_hours: int = 0,
+) -> Split:
     if not 0 < test_fraction < 1:
         raise ValueError("test_fraction must be between 0 and 1")
+    if horizon_hours < 0:
+        raise ValueError("horizon_hours must be non-negative")
     ordered = frame.sort_values("datetime", kind="mergesort").reset_index(drop=True)
     timestamps = ordered["datetime"].drop_duplicates().sort_values().reset_index(drop=True)
+    if len(timestamps) < 2:
+        raise ValueError("At least two distinct timestamps are required for a split")
     cutoff_position = max(
         1, min(len(timestamps) - 1, int(len(timestamps) * (1 - test_fraction)))
     )
     cutoff = timestamps.iloc[cutoff_position]
-    train = ordered[ordered["datetime"] < cutoff].copy()
+    # Labels inspect failures up to `horizon_hours` after each telemetry row.
+    # Purge rows whose label window could reach into the held-out period.
+    train_cutoff = cutoff - pd.Timedelta(hours=horizon_hours)
+    train = ordered[ordered["datetime"] < train_cutoff].copy()
     test = ordered[ordered["datetime"] >= cutoff].copy()
     if train.empty or test.empty:
         raise ValueError("Chronological split produced an empty train or test set")
