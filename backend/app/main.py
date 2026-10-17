@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .agent import run_maintenance_agent
 from .analysis import analyze_readings, threshold_config
 from .data import (
     DataError,
@@ -38,7 +39,11 @@ DEFAULT_ORIGINS = {
 def allowed_origins() -> list[str]:
     configured = os.getenv("FORGEMIND_CORS_ORIGINS")
     if configured:
-        return [origin.strip() for origin in configured.split(",") if origin.strip()]
+        return [
+            origin.strip()
+            for origin in configured.split(",")
+            if origin.strip()
+        ]
     return sorted(DEFAULT_ORIGINS)
 
 
@@ -124,7 +129,10 @@ def get_machine_sensors(
         }
     except DataError as exc:
         status_code = 404 if "not found" in str(exc).lower() else 503
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status_code,
+            detail=str(exc),
+        ) from exc
 
 
 @app.get("/api/machines/{machine_id}/analysis")
@@ -132,7 +140,7 @@ def get_machine_analysis(
     machine_id: str,
     limit: int = Query(default=100, ge=1, le=1000),
     window: int = Query(default=10, ge=1, le=100),
-) -> dict[str, object]:
+) -> dict[str, Any]:
     try:
         ensure_machine_id(machine_id)
         readings = machine_sensor_readings(machine_id)[-limit:]
@@ -142,29 +150,36 @@ def get_machine_analysis(
             window=window,
             thresholds=threshold_config(),
         )
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except DataError as exc:
         status_code = 404 if "not found" in str(exc).lower() else 503
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status_code,
+            detail=str(exc),
+        ) from exc
 
 
 @app.post("/api/assistant")
-def assistant(request: AssistantRequest) -> dict[str, str]:
+def assistant(request: AssistantRequest) -> dict[str, Any]:
     try:
         ensure_machine_id(request.machineId)
-    except DataError as exc:
-        status_code = 404 if "not found" in str(exc).lower() else 503
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
 
-    return {
-        "answer": (
-            f"Phase 1 assistant response for {request.machineId}: the AMD-hosted "
-            "model and ML predictor are not connected yet. No prediction or AI "
-            "diagnosis was generated. The backend can provide synthetic sensor "
-            "data for the next integration phase."
+        return run_maintenance_agent(
+            message=request.message,
+            machine_id=request.machineId,
         )
-    }
+
+    except HTTPException:
+        raise
+    except DataError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.post("/api/historical/predict")

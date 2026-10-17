@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from fastapi.testclient import TestClient
 
 from app.analysis import ThresholdConfig, analyze_readings
@@ -39,21 +41,62 @@ def test_invalid_machine_id_is_not_joined_to_historical_namespace() -> None:
     assert "Synthetic machine not found" in response.json()["detail"]
 
 
-def test_assistant_contract_and_phase_1_disclosure() -> None:
-    response = client.post(
-        "/api/assistant",
-        json={"message": "Why is this machine at risk?", "machineId": "M17"},
-    )
+def test_assistant_contract_and_amd_integration() -> None:
+    mock_result = {
+        "answer": (
+            "The available synthetic sensor data requires investigation. "
+            "A validated failure probability is unavailable."
+        ),
+        "machineId": "M17",
+        "model": "DeepSeek-V4-Flash",
+        "provider": "AMD Token Factory",
+        "tools_used": ["analyze_machine", "get_failure_risk"],
+        "status": "completed",
+        "data_status": "synthetic_demo",
+        "requires_human_approval": True,
+    }
+
+    with patch(
+        "app.main.run_maintenance_agent",
+        return_value=mock_result,
+    ) as mock_agent:
+        response = client.post(
+            "/api/assistant",
+            json={
+                "message": "Why is this machine at risk?",
+                "machineId": "M17",
+            },
+        )
+
     assert response.status_code == 200
-    answer = response.json()["answer"]
-    assert "AMD-hosted model" in answer
-    assert "ML predictor" in answer
-    assert "No prediction or AI diagnosis was generated" in answer
+    payload = response.json()
+    assert payload["machineId"] == "M17"
+    assert payload["provider"] == "AMD Token Factory"
+    assert payload["model"] == "DeepSeek-V4-Flash"
+    assert payload["status"] == "completed"
+    assert payload["data_status"] == "synthetic_demo"
+    assert payload["requires_human_approval"] is True
+    assert payload["tools_used"] == ["analyze_machine", "get_failure_risk"]
+    mock_agent.assert_called_once_with(
+        message="Why is this machine at risk?",
+        machine_id="M17",
+    )
 
 
 def test_assistant_rejects_malformed_request() -> None:
     response = client.post("/api/assistant", json={"machineId": "M17"})
     assert response.status_code == 422
+
+
+def test_assistant_rejects_unknown_machine() -> None:
+    response = client.post(
+        "/api/assistant",
+        json={
+            "message": "Investigate this machine.",
+            "machineId": "M99",
+        },
+    )
+    assert response.status_code == 404
 
 
 def reading(
@@ -104,10 +147,24 @@ def test_analysis_rising_flat_and_insufficient_data() -> None:
         "M01",
         window=2,
     )
-    assert rising["analysis"]["derivedMetrics"]["temperature"]["trendDirection"] == "increasing"
-    assert flat["analysis"]["derivedMetrics"]["temperature"]["trendDirection"] == "flat"
-    assert insufficient["analysis"]["derivedMetrics"]["temperature"]["trendDirection"] == "insufficient_data"
-    assert insufficient["analysis"]["derivedMetrics"]["temperature"]["recentMovingAverage"] is None
+    assert (
+        rising["analysis"]["derivedMetrics"]["temperature"]["trendDirection"]
+        == "increasing"
+    )
+    assert (
+        flat["analysis"]["derivedMetrics"]["temperature"]["trendDirection"]
+        == "flat"
+    )
+    assert (
+        insufficient["analysis"]["derivedMetrics"]["temperature"]["trendDirection"]
+        == "insufficient_data"
+    )
+    assert (
+        insufficient["analysis"]["derivedMetrics"]["temperature"][
+            "recentMovingAverage"
+        ]
+        is None
+    )
 
 
 def test_analysis_zero_baseline_and_threshold_boundary() -> None:
@@ -159,7 +216,6 @@ def test_decisions_endpoint_returns_maintenance_options() -> None:
         "scheduled_replacement",
         "continue_monitoring",
     }
-
 
 
 def test_decisions_endpoint_discloses_cost_limitations() -> None:

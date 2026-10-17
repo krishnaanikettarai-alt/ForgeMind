@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   Activity,
   ArrowRight,
@@ -200,8 +202,12 @@ function App() {
   const [datasetState, setDatasetState] = useState<"loading" | "ready" | "unavailable">("loading");
   const [message, setMessage] = useState("");
   const [chat, setChat] = useState<{ role: "user" | "agent"; text: string }[]>([
-    { role: "agent", text: "The local backend can provide deterministic sensor analysis for the selected machine. The AMD-hosted model and ML predictor are not connected, so no real prediction or diagnosis is available." },
+    {
+      role: "agent",
+      text: "I can analyze synthetic sensor readings, compare provisional maintenance costs, and explain what remains unknown. Failure-risk estimates are not validated for these demo machines, and operational decisions require human approval.",
+    },
   ]);
+  const [isSending, setIsSending] = useState(false);
   const [notice, setNotice] = useState("");
   const [apiMode, setApiMode] = useState(import.meta.env.VITE_AGENT_API_URL ? "Local API configured" : "Demo data");
   const [analysis, setAnalysis] = useState<AnalysisState>({ status: import.meta.env.VITE_AGENT_API_URL ? "loading" : "unavailable", error: "Configure VITE_AGENT_API_URL to load backend analysis." });
@@ -269,22 +275,90 @@ function App() {
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const question = message.trim();
-    if (!question) return;
+    if (!question || isSending) return;
+
     setChat((items) => [...items, { role: "user", text: question }]);
     setMessage("");
-    if (apiBase) {
-      try {
-        const response = await fetch(`${apiBase}/api/assistant`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: question, machineId: selectedMachine, context: { machine: currentMachine, analysis: analysis.data ?? null, analysisStatus: analysis.status } }) });
-        if (!response.ok) throw new Error("Agent request failed");
-        const data = await response.json();
-        setChat((items) => [...items, { role: "agent", text: data.response ?? data.answer ?? "The AMD agent returned no response." }]);
-        setApiMode("Local API connected");
-      } catch {
-        setChat((items) => [...items, { role: "agent", text: "I couldn't reach the configured AMD agent endpoint. Check VITE_AGENT_API_URL and confirm the API accepts POST requests with a JSON message and machine context." }]);
-      }
+    setIsSending(true);
+
+    if (!apiBase) {
+      window.setTimeout(() => {
+        setChat((items) => [...items, { role: "agent", text: "Demo mode is active. Configure VITE_AGENT_API_URL to use the local AMD-powered assistant." }]);
+        setIsSending(false);
+      }, 300);
       return;
     }
-    window.setTimeout(() => setChat((items) => [...items, { role: "agent", text: "Demo mode is active. No backend analysis or AI diagnosis was requested because VITE_AGENT_API_URL is not configured." }]), 650);
+
+    try {
+      const response = await fetch(`${apiBase}/api/assistant`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: question,
+          machineId: selectedMachine,
+          context: {
+            machine: currentMachine,
+            analysis: analysis.data ?? null,
+            analysisStatus: analysis.status,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        let detail = "The assistant request failed.";
+        try {
+          const errorData = await response.json();
+          if (typeof errorData.detail === "string") detail = errorData.detail;
+        } catch {
+          // Keep the generic error when the response is not JSON.
+        }
+
+        // The backend may wrap an AMD provider error in HTTP 502.
+        if (
+          response.status === 429 ||
+          /HTTP status:\s*429|rate.?limit|too many requests/i.test(detail)
+        ) {
+          throw new Error("FORGEMIND_PROVIDER_RATE_LIMITED");
+        }
+
+        if (
+          response.status === 502 ||
+          response.status === 503 ||
+          response.status === 504
+        ) {
+          throw new Error("FORGEMIND_PROVIDER_UNAVAILABLE");
+        }
+
+        throw new Error(detail);
+      }
+
+      const data = await response.json();
+      setChat((items) => [
+        ...items,
+        { role: "agent", text: data.response ?? data.answer ?? "The AMD agent returned no response." },
+      ]);
+      setApiMode("Local API connected");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Unknown request error.";
+      let userMessage: string;
+
+      if (detail === "FORGEMIND_PROVIDER_RATE_LIMITED") {
+        userMessage =
+          "The AI provider is temporarily rate-limited. Please wait briefly and retry. No maintenance action was performed.";
+      } else if (detail === "FORGEMIND_PROVIDER_UNAVAILABLE") {
+        userMessage =
+          "The AI provider is temporarily unavailable. Please retry shortly. No maintenance action was performed.";
+      } else if (error instanceof TypeError) {
+        userMessage =
+          "Could not connect to the assistant API. Check that the backend is running and that VITE_AGENT_API_URL is correct. No maintenance action was performed.";
+      } else {
+        userMessage = `The assistant request failed: ${detail} No maintenance action was performed. Check the backend terminal for details.`;
+      }
+
+      setChat((items) => [...items, { role: "agent", text: userMessage }]);
+    } finally {
+      setIsSending(false);
+    }
   }
 
   const pageTitle = page === "Machine detail" ? `${currentMachine.id} · Machine detail` : page;
@@ -296,7 +370,7 @@ function App() {
       <p className="side-label">WORKSPACE</p>
       <nav className="space-y-1" aria-label="Main navigation">{navItems.map(({ label, icon: Icon }) => <button key={label} onClick={() => { setPage(label); setMobileNav(false); }} className={`nav-item ${page === label || (page === "Machine detail" && label === "Machines") ? "nav-active" : ""}`}><Icon size={17}/><span>{label}</span>{label === "Predictions" && <span className="ml-auto rounded-full bg-rose-400/15 px-1.5 py-0.5 text-[10px] font-semibold text-rose-300">3</span>}</button>)}</nav>
       <p className="side-label mt-8">SYSTEM</p><button className="nav-item" onClick={() => showNotice("Settings are managed by your workspace administrator.")}><Settings2 size={17}/><span>Settings</span></button>
-      <div className="sidebar-bottom"><div className="agent-status"><div className="flex items-center gap-2"><span className={`size-2 rounded-full ${apiMode.includes("connected") ? "bg-emerald-400" : "bg-amber-300"}`} /><span className="text-xs font-medium text-slate-200">{apiMode}</span></div><p className="mt-2 text-[10px] leading-relaxed text-slate-500">{apiMode === "Demo data" ? "Demo mode · Configure VITE_AGENT_API_URL for the local backend." : "FastAPI connected · AMD model not connected"}</p><div className="mt-3 flex items-center gap-1.5 text-[10px] text-slate-600"><ShieldCheck size={12}/>Secure connection</div></div><div className="profile-row"><div className="avatar">RM</div><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-slate-200">Reliability Manager</p><p className="mt-0.5 text-[10px] text-slate-500">Operations team</p></div><ChevronDown size={14} className="text-slate-500"/></div></div>
+      <div className="sidebar-bottom"><div className="agent-status"><div className="flex items-center gap-2"><span className={`size-2 rounded-full ${apiMode.includes("connected") ? "bg-emerald-400" : "bg-amber-300"}`} /><span className="text-xs font-medium text-slate-200">{apiMode}</span></div><p className="mt-2 text-[10px] leading-relaxed text-slate-500">{apiMode === "Demo data" ? "Demo mode · Configure VITE_AGENT_API_URL for the local backend." : "FastAPI + AMD assistant connected · synthetic demo data"}</p><div className="mt-3 flex items-center gap-1.5 text-[10px] text-slate-600"><ShieldCheck size={12}/>Secure connection</div></div><div className="profile-row"><div className="avatar">RM</div><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-slate-200">Reliability Manager</p><p className="mt-0.5 text-[10px] text-slate-500">Operations team</p></div><ChevronDown size={14} className="text-slate-500"/></div></div>
     </aside>
 
     <div className="main-column">
@@ -308,7 +382,7 @@ function App() {
         {page === "Machine detail" && <MachineDetail machine={currentMachine} sensor={sensorAssets[currentMachine.id]} analysis={analysis} onAction={showNotice} onNavigate={setPage}/>}
         {page === "Predictions" && <Predictions onOpen={openMachine}/>}
         {page === "Maintenance" && <MaintenancePage onAction={showNotice} decisions={decisions}/>}
-        {page === "Assistant" && <AssistantPage chat={chat} message={message} setMessage={setMessage} machine={currentMachine} analysis={analysis} onSend={sendMessage} onSchedule={() => showNotice(`Maintenance request created for ${currentMachine.id} · proposed window: next 48 hours.`)}/>}
+        {page === "Assistant" && <AssistantPage chat={chat} message={message} setMessage={setMessage} machine={currentMachine} analysis={analysis} isSending={isSending} onSend={sendMessage}/>}
         {page === "Data sources" && <DataSourcesPage sensorCount={Object.keys(sensorAssets).length} datasetState={datasetState}/>}
       </main>
     </div>
@@ -463,9 +537,108 @@ function DataSourcesPage({ sensorCount, datasetState }: { sensorCount: number; d
   </>;
 }
 
-function AssistantPage({ chat, message, setMessage, machine, analysis, onSend, onSchedule }: { chat: {role:"user"|"agent";text:string}[]; message: string; setMessage: (text:string)=>void; machine: Machine; analysis: AnalysisState; onSend: (event:FormEvent<HTMLFormElement>)=>void; onSchedule: ()=>void }) {
+function AssistantPage({ chat, message, setMessage, machine, analysis, isSending, onSend }: {
+  chat: { role: "user" | "agent"; text: string }[];
+  message: string;
+  setMessage: (text: string) => void;
+  machine: Machine;
+  analysis: AnalysisState;
+  isSending: boolean;
+  onSend: (event: FormEvent<HTMLFormElement>) => void;
+}) {
   const summary = analysis.data?.analysis;
-  return <><PageHeading eyebrow="Maintenance copilot" title="AI assistant" subtitle="Investigate observed machine signals and turn them into a maintenance plan." action={<span className="flex items-center gap-2 rounded-full border border-amber-300/15 bg-amber-300/[0.05] px-3 py-1.5 text-[10px] text-amber-200"><span className="live-dot"/>Local API · AMD model not connected</span>}/><div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_300px]"><section className="panel flex min-h-[560px] flex-col"><div className="panel-heading"><div className="flex items-center gap-3"><div className="agent-avatar"><Bot size={18}/></div><div><h2 className="text-sm font-semibold text-white">ForgeMind maintenance copilot</h2><p className="mt-1 text-[10px] text-slate-500">Context: {machine.id} · {machine.name}</p></div></div><span className="rounded-full bg-white/[0.04] px-2 py-1 text-[9px] text-slate-500">{analysis.status === "ready" ? "Analysis ready" : analysis.status === "loading" ? "Loading analysis" : "Analysis unavailable"}</span></div><div className="flex-1 space-y-5 overflow-y-auto p-5">{chat.map((item,index) => item.role === "user" ? <div key={index} className="flex justify-end"><div className="max-w-[80%] rounded-2xl rounded-br-sm bg-emerald-300 px-4 py-3 text-xs leading-relaxed text-[#07110e]">{item.text}</div></div> : <div key={index} className="flex items-start gap-3"><div className="agent-avatar small"><Bot size={14}/></div><div className="max-w-[90%] rounded-2xl rounded-tl-sm border border-white/[0.065] bg-white/[0.025] px-4 py-3.5 text-xs leading-[1.8] text-slate-300">{item.text}</div></div>)}</div><div className="border-t border-white/[0.06] p-4"><div className="mb-3 flex flex-wrap gap-2">{[`Why is ${machine.id} at high risk?`, "Review observed sensor changes", "Estimate downtime cost"].map((prompt) => <button key={prompt} onClick={() => setMessage(prompt)} className="rounded-full border border-white/[0.07] px-3 py-1.5 text-[10px] text-slate-400 transition hover:border-white/15 hover:text-slate-200">{prompt}</button>)}</div><form onSubmit={onSend} className="flex items-center gap-2 rounded-xl border border-white/[0.08] bg-[#0b0f10] p-2"><input value={message} onChange={(e)=>setMessage(e.target.value)} placeholder="Ask about observed signals or maintenance..." className="min-w-0 flex-1 bg-transparent px-2 py-2 text-xs text-slate-200 outline-none placeholder:text-slate-600"/><button className="rounded-lg bg-emerald-300 p-2.5 text-[#07110e] transition hover:bg-emerald-200" type="submit" aria-label="Send message"><Send size={15}/></button></form><p className="mt-2 px-1 text-[9px] text-slate-600">The AMD model and ML predictor are not connected. Recommendations are decision support only.</p></div></section><aside className="space-y-4"><section className="panel"><div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">Machine context</h2><p className="mt-1 text-[10px] text-slate-500">Observed and derived local analysis</p></div><Cpu size={15} className="text-slate-500"/></div><div className="space-y-3 px-5 pb-5"><div className="flex justify-between gap-3 text-[10px]"><span className="text-slate-500">Asset</span><span className="text-right text-slate-300">{machine.id} · {machine.type}</span></div>{summary ? <><div className="flex justify-between gap-3 text-[10px]"><span className="text-slate-500">Analysis</span><span className="text-right text-emerald-300">Deterministic</span></div><div className="flex justify-between gap-3 text-[10px]"><span className="text-slate-500">Threshold checks</span><span className="text-right text-amber-200">Unvalidated demo</span></div></> : <div className="text-[10px] text-slate-500">{analysis.error ?? "Analysis is not available."}</div>}</div></section><section className="panel p-5"><div className="flex items-center gap-2"><Settings2 size={15} className="text-emerald-300"/><h2 className="text-sm font-semibold text-white">Backend capabilities</h2></div><p className="mt-2 text-[10px] leading-relaxed text-slate-500">The local FastAPI API provides observed readings and deterministic summaries. AMD and ML capabilities are not connected.</p><div className="mt-4 space-y-2">{["get_machine()","get_sensor_history()","analyze_sensor_trends()"].map((tool)=><div key={tool} className="rounded-lg bg-white/[0.025] px-3 py-2 font-mono text-[9px] text-slate-400"><span className="mr-2 text-emerald-300">›</span>{tool}</div>)}</div></section><section className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4"><p className="text-[10px] font-semibold text-slate-400">Integration contract</p><p className="mt-1.5 text-[10px] leading-relaxed text-slate-600">POST JSON includes <code className="text-slate-400">message</code>, <code className="text-slate-400">machineId</code>, and the latest <code className="text-slate-400">analysis</code> response when available.</p></section></aside></div></>;
+
+  return <>
+    <PageHeading
+      eyebrow="Maintenance copilot"
+      title="AI assistant"
+      subtitle="Investigate observed machine signals and compare provisional maintenance options."
+      action={<span className="flex items-center gap-2 rounded-full border border-emerald-300/15 bg-emerald-300/[0.05] px-3 py-1.5 text-[10px] text-emerald-200"><span className="live-dot" />AMD-hosted assistant</span>}
+    />
+    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_300px]">
+      <section className="panel flex min-h-[560px] flex-col">
+        <div className="panel-heading">
+          <div className="flex items-center gap-3">
+            <div className="agent-avatar"><Bot size={18} /></div>
+            <div>
+              <h2 className="text-sm font-semibold text-white">ForgeMind maintenance copilot</h2>
+              <p className="mt-1 text-[10px] text-slate-500">Context: {machine.id} · {machine.name}</p>
+            </div>
+          </div>
+          <span className="rounded-full bg-white/[0.04] px-2 py-1 text-[9px] text-slate-500">
+            {analysis.status === "ready" ? "Analysis ready" : analysis.status === "loading" ? "Loading analysis" : "Analysis unavailable"}
+          </span>
+        </div>
+
+        <div className="flex-1 space-y-5 overflow-y-auto p-5">
+          {chat.map((item, index) => item.role === "user" ? (
+            <div key={index} className="flex justify-end">
+              <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-emerald-300 px-4 py-3 text-xs leading-relaxed text-[#07110e]">{item.text}</div>
+            </div>
+          ) : (
+            <div key={index} className="flex items-start gap-3">
+              <div className="agent-avatar small"><Bot size={14} /></div>
+              <div className="markdown-answer max-w-[95%] min-w-0 rounded-2xl rounded-tl-sm border border-white/[0.065] bg-white/[0.025] px-4 py-3.5 text-xs leading-[1.8] text-slate-300">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    h1: ({ children }) => <h1 className="mb-3 mt-1 text-base font-semibold text-white">{children}</h1>,
+                    h2: ({ children }) => <h2 className="mb-2 mt-4 text-sm font-semibold text-white">{children}</h2>,
+                    h3: ({ children }) => <h3 className="mb-2 mt-4 text-xs font-semibold uppercase tracking-wide text-emerald-200">{children}</h3>,
+                    p: ({ children }) => <p className="mb-3 last:mb-0">{children}</p>,
+                    strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
+                    ul: ({ children }) => <ul className="mb-3 list-disc space-y-1 pl-5 last:mb-0">{children}</ul>,
+                    ol: ({ children }) => <ol className="mb-3 list-decimal space-y-1 pl-5 last:mb-0">{children}</ol>,
+                    li: ({ children }) => <li className="pl-1">{children}</li>,
+                    table: ({ children }) => <div className="mb-3 max-w-full overflow-x-auto rounded-lg border border-white/10"><table className="w-full min-w-[420px] border-collapse text-left text-[11px]">{children}</table></div>,
+                    thead: ({ children }) => <thead className="bg-white/[0.06] text-slate-100">{children}</thead>,
+                    th: ({ children }) => <th className="border-b border-white/10 px-3 py-2 font-semibold">{children}</th>,
+                    td: ({ children }) => <td className="border-b border-white/[0.06] px-3 py-2 align-top">{children}</td>,
+                    code: ({ children }) => <code className="rounded bg-white/[0.07] px-1 py-0.5 font-mono text-[10px] text-emerald-200">{children}</code>,
+                    blockquote: ({ children }) => <blockquote className="mb-3 border-l-2 border-emerald-300/50 pl-3 text-slate-400">{children}</blockquote>,
+                    hr: () => <hr className="my-4 border-white/10" />,
+                  }}
+                >
+                  {item.text}
+                </ReactMarkdown>
+              </div>
+            </div>
+          ))}
+          {isSending && <div className="flex items-center gap-3 text-xs text-slate-400" role="status" aria-live="polite"><div className="agent-avatar small"><Bot size={14} /></div><span className="inline-flex items-center gap-2"><span className="size-1.5 animate-pulse rounded-full bg-emerald-300" />Analyzing sensor evidence and maintenance options…</span></div>}
+        </div>
+
+        <div className="border-t border-white/[0.06] p-4">
+          <div className="mb-3 flex flex-wrap gap-2">
+            {[`Why is ${machine.id} at high risk?`, "Review observed sensor changes", "Estimate downtime cost"].map((prompt) => <button key={prompt} onClick={() => setMessage(prompt)} disabled={isSending} className="rounded-full border border-white/[0.07] px-3 py-1.5 text-[10px] text-slate-400 transition hover:border-white/15 hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-50">{prompt}</button>)}
+          </div>
+          <form onSubmit={onSend} className="flex items-center gap-2 rounded-xl border border-white/[0.08] bg-[#0b0f10] p-2">
+            <input value={message} onChange={(event) => setMessage(event.target.value)} disabled={isSending} placeholder="Ask about observed signals or maintenance…" className="min-w-0 flex-1 bg-transparent px-2 py-2 text-xs text-slate-200 outline-none placeholder:text-slate-600 disabled:opacity-60" />
+            <button className="rounded-lg bg-emerald-300 p-2.5 text-[#07110e] transition hover:bg-emerald-200 disabled:cursor-wait disabled:opacity-50" type="submit" disabled={isSending || !message.trim()} aria-label="Send message"><Send size={15} /></button>
+          </form>
+          <p className="mt-2 px-1 text-[9px] text-slate-600">Responses use synthetic demo data. Failure risk is unvalidated; human approval is required for operational action.</p>
+        </div>
+      </section>
+
+      <aside className="space-y-4">
+        <section className="panel">
+          <div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">Machine context</h2><p className="mt-1 text-[10px] text-slate-500">Observed and derived local analysis</p></div><Cpu size={15} className="text-slate-500" /></div>
+          <div className="space-y-3 px-5 pb-5">
+            <div className="flex justify-between gap-3 text-[10px]"><span className="text-slate-500">Asset</span><span className="text-right text-slate-300">{machine.id} · {machine.type}</span></div>
+            {summary ? <>
+              <div className="flex justify-between gap-3 text-[10px]"><span className="text-slate-500">Analysis</span><span className="text-right text-emerald-300">Deterministic</span></div>
+              <div className="flex justify-between gap-3 text-[10px]"><span className="text-slate-500">Threshold checks</span><span className="text-right text-amber-200">Unvalidated demo</span></div>
+            </> : <div className="text-[10px] text-slate-500">{analysis.error ?? "Analysis is not available."}</div>}
+          </div>
+        </section>
+        <section className="panel p-5">
+          <div className="flex items-center gap-2"><Settings2 size={15} className="text-emerald-300" /><h2 className="text-sm font-semibold text-white">Connected capabilities</h2></div>
+          <p className="mt-2 text-[10px] leading-relaxed text-slate-500">The AMD-hosted assistant can call backend tools for sensor analysis, maintenance cost comparison, and failure-risk availability checks.</p>
+          <div className="mt-4 space-y-2">{["analyze_machine()", "compare_maintenance_options()", "get_failure_risk()"].map((tool) => <div key={tool} className="rounded-lg bg-white/[0.025] px-3 py-2 font-mono text-[9px] text-slate-400"><span className="mr-2 text-emerald-300">›</span>{tool}</div>)}</div>
+        </section>
+        <section className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4"><p className="text-[10px] font-semibold text-slate-400">Data and safety note</p><p className="mt-1.5 text-[10px] leading-relaxed text-slate-600">Sensor values and maintenance costs are synthetic demo data. No validated failure probability is available for this machine, and no operational action is automatically approved.</p></section>
+      </aside>
+    </div>
+  </>;
 }
 
 function AssistantPageLegacy({ chat, message, setMessage, onSend, onSchedule }: { chat: {role:"user"|"agent";text:string}[]; message: string; setMessage: (text:string)=>void; onSend: (event:FormEvent<HTMLFormElement>)=>void; onSchedule: ()=>void }) {
