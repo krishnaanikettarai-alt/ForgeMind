@@ -1,5 +1,4 @@
 node_modules/
-backend/.venv/
 dist/
 dist-ssr/
 *.tsbuildinfo
@@ -11,11 +10,3 @@ dist-ssr/
 .vscode/
 # Previous nested scaffold kept locally; the canonical app is this folder.
 forgemind-signup/
-
-# Python generated files
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.venv/
-backend/ml/artifacts/*.joblib
-backend/ml/artifacts/*.json
