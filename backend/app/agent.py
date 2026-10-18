@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from openai import APIError, APITimeoutError, OpenAI
@@ -186,12 +187,25 @@ def _dispatch_tool(
     return {"error": "Unknown tool."}
 
 
+def _clean_answer(answer: str) -> str:
+    """Remove known trailing editing artifacts from model-generated answers."""
+    answer = answer.strip()
+
+    # Remove only the known artifact when it appears at the end of a response.
+    answer = re.sub(r"\s*\)Skip\.\s*$", "", answer, flags=re.IGNORECASE)
+    answer = re.sub(r"\s+Skip\.\s*$", "", answer, flags=re.IGNORECASE)
+
+    return answer.strip()
+
+
 def _response_payload(
     answer: str,
     machine_id: str,
     model: str,
     tools_used: list[str],
 ) -> dict[str, Any]:
+    answer = _clean_answer(answer)
+
     return {
         "answer": answer,
         "machineId": machine_id,
