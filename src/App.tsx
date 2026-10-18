@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   Activity,
   ArrowRight,
@@ -47,6 +49,69 @@ type Machine = {
 type SensorPoint = { timestamp: string; vibration: number; temperature: number; current: number };
 type SensorAsset = { rows: number; points: SensorPoint[] };
 type SensorAssets = Record<string, SensorAsset>;
+type SensorMetric = {
+  readingsAnalyzed: number;
+  firstObserved: number;
+  lastObserved: number;
+  absoluteChange: number;
+  percentageChange: number | null;
+  recentMovingAverage: number | null;
+  trendDirection: "increasing" | "decreasing" | "flat" | "insufficient_data";
+};
+type ThresholdFlag = {
+  flagged: boolean;
+  observedValue: number;
+  threshold: number;
+  comparison: string;
+  source: string;
+  status: string;
+};
+type SensorAnalysis = {
+  machineId: string;
+  source: "synthetic";
+  timeRange: { firstTimestamp: string; lastTimestamp: string };
+  analysis: {
+    window: number;
+    observedMeasurements: Record<"vibration" | "temperature" | "current", Pick<SensorMetric, "readingsAnalyzed" | "firstObserved" | "lastObserved">>;
+    derivedMetrics: Record<"vibration" | "temperature" | "current", Omit<SensorMetric, "readingsAnalyzed" | "firstObserved" | "lastObserved">>;
+    thresholdFlags: Record<"vibration" | "temperature" | "current", ThresholdFlag>;
+    thresholds: { vibration: number; temperature: number; current: number; source: string; status: string };
+  };
+  limitations: string[];
+};
+type AnalysisState = { status: "loading" | "ready" | "unavailable"; data?: SensorAnalysis; error?: string };
+
+type DecisionOption = {
+  name: string;
+  part_cost_inr: number;
+  downtime_hours: number;
+  downtime_cost_inr: number;
+  total_cost_inr: number;
+  lead_time_days: number;
+  stock_available: boolean;
+  trade_off: string;
+};
+
+type DecisionData = {
+  data_status: string;
+  part_id: string;
+  currency: string;
+  decision_status: string;
+  recommendation_basis: string;
+  recommended_option: string | null;
+  lowest_immediate_cost_option: string;
+  risk_assessment: string;
+  requires_human_approval: boolean;
+  decision_explanation: string;
+  options: DecisionOption[];
+  assumptions: string[];
+};
+
+type DecisionState = {
+  status: "loading" | "ready" | "unavailable";
+  data?: DecisionData;
+  error?: string;
+};
 
 const dataFiles = [
   { name: "sensor_readings.csv", label: "Condition sensor samples", rows: "100,000", detail: "20 assets · minute-level vibration, temperature, and current", size: "7.7 MB" },
@@ -137,11 +202,20 @@ function App() {
   const [datasetState, setDatasetState] = useState<"loading" | "ready" | "unavailable">("loading");
   const [message, setMessage] = useState("");
   const [chat, setChat] = useState<{ role: "user" | "agent"; text: string }[]>([
-    { role: "agent", text: "In this demo scenario, M17 has a 91% predicted failure probability. The attached CSV contains separate sensor samples and does not generate this risk score. Connect a prediction service through the AMD agent API to replace this illustrative assessment with your own model output." },
+    {
+      role: "agent",
+      text: "I can analyze synthetic sensor readings, compare provisional maintenance costs, and explain what remains unknown. Failure-risk estimates are not validated for these demo machines, and operational decisions require human approval.",
+    },
   ]);
+  const [isSending, setIsSending] = useState(false);
   const [notice, setNotice] = useState("");
-  const [apiMode, setApiMode] = useState(import.meta.env.VITE_AGENT_API_URL ? "AMD agent bridge" : "Demo data");
+  const [apiMode, setApiMode] = useState(import.meta.env.VITE_AGENT_API_URL ? "Local API configured" : "Demo data");
+  const [analysis, setAnalysis] = useState<AnalysisState>({ status: import.meta.env.VITE_AGENT_API_URL ? "loading" : "unavailable", error: "Configure VITE_AGENT_API_URL to load backend analysis." });
+  const [decisions, setDecisions] = useState<DecisionState>({
+  status: "loading",
+});
   const currentMachine = machines.find((machine) => machine.id === selectedMachine) ?? machines[3];
+  const apiBase = (import.meta.env.VITE_AGENT_API_URL as string | undefined)?.replace(/\/$/, "");
   const filteredMachines = useMemo(() => machines.filter((machine) => (filter === "All" || machine.status === filter) && `${machine.id} ${machine.name} ${machine.type}`.toLowerCase().includes(query.toLowerCase())), [filter, query]);
 
   useEffect(() => {
@@ -155,29 +229,131 @@ function App() {
       .catch(() => setDatasetState("unavailable"));
   }, []);
 
+  useEffect(() => {
+    if (!apiBase) {
+      setAnalysis({ status: "unavailable", error: "Backend analysis is not configured." });
+      return;
+    }
+    const controller = new AbortController();
+    setAnalysis({ status: "loading" });
+    fetch(`${apiBase}/api/machines/${encodeURIComponent(selectedMachine)}/analysis`, { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`Analysis request failed (${response.status})`);
+        return response.json() as Promise<SensorAnalysis>;
+      })
+      .then((data) => { setAnalysis({ status: "ready", data }); setApiMode("Local API connected"); })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setAnalysis({ status: "unavailable", error: "Analysis is unavailable. Check that the local backend is running." });
+      });
+    return () => controller.abort();
+  }, [apiBase, selectedMachine]);
+
+  useEffect(() => {
+    if (!apiBase) {
+      setDecisions({ status: "unavailable", error: "Configure VITE_AGENT_API_URL to load maintenance decisions." });
+      return;
+    }
+    const controller = new AbortController();
+    setDecisions({ status: "loading" });
+    fetch(`${apiBase}/api/decisions`, { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`Decision request failed (${response.status})`);
+        return response.json() as Promise<DecisionData>;
+      })
+      .then((data) => setDecisions({ status: "ready", data }))
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setDecisions({ status: "unavailable", error: "Maintenance decisions are unavailable. Check that the backend is running." });
+      });
+    return () => controller.abort();
+  }, [apiBase]);
+
   const openMachine = (id: string) => { setSelectedMachine(id); setPage("Machine detail"); };
   const showNotice = (text: string) => { setNotice(text); window.setTimeout(() => setNotice(""), 3200); };
 
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const question = message.trim();
-    if (!question) return;
+    if (!question || isSending) return;
+
     setChat((items) => [...items, { role: "user", text: question }]);
     setMessage("");
-    const endpoint = import.meta.env.VITE_AGENT_API_URL as string | undefined;
-    if (endpoint) {
-      try {
-        const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: question, machineId: selectedMachine, context: { machine: currentMachine, sensorHistory: { vibration: [2.1, 2.5, 2.9, 3.8, 4.4, 5.2], temperature: [61, 63, 66, 73, 79, 84], current: [18, 19, 21, 23, 24, 26] } } }) });
-        if (!response.ok) throw new Error("Agent request failed");
-        const data = await response.json();
-        setChat((items) => [...items, { role: "agent", text: data.response ?? data.answer ?? "The AMD agent returned no response." }]);
-        setApiMode("AMD agent connected");
-      } catch {
-        setChat((items) => [...items, { role: "agent", text: "I couldn't reach the configured AMD agent endpoint. Check VITE_AGENT_API_URL and confirm the API accepts POST requests with a JSON message and machine context." }]);
-      }
+    setIsSending(true);
+
+    if (!apiBase) {
+      window.setTimeout(() => {
+        setChat((items) => [...items, { role: "agent", text: "Demo mode is active. Configure VITE_AGENT_API_URL to use the local AMD-powered assistant." }]);
+        setIsSending(false);
+      }, 300);
       return;
     }
-    window.setTimeout(() => setChat((items) => [...items, { role: "agent", text: "This is a demo response using sample M17 risk data. The CSV files are available in Data sources; connect your AMD agent endpoint with VITE_AGENT_API_URL to have your agent analyze actual telemetry and return maintenance recommendations." }]), 650);
+
+    try {
+      const response = await fetch(`${apiBase}/api/assistant`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: question,
+          machineId: selectedMachine,
+        }),
+      });
+
+      if (!response.ok) {
+        let detail = "The assistant request failed.";
+        try {
+          const errorData = await response.json();
+          if (typeof errorData.detail === "string") detail = errorData.detail;
+        } catch {
+          // Keep the generic error when the response is not JSON.
+        }
+
+        // The backend may wrap an AMD provider error in HTTP 502.
+        if (
+          response.status === 429 ||
+          /HTTP status:\s*429|rate.?limit|too many requests/i.test(detail)
+        ) {
+          throw new Error("FORGEMIND_PROVIDER_RATE_LIMITED");
+        }
+
+        if (
+          response.status === 502 ||
+          response.status === 503 ||
+          response.status === 504
+        ) {
+          throw new Error("FORGEMIND_PROVIDER_UNAVAILABLE");
+        }
+
+        throw new Error(detail);
+      }
+
+      const data = await response.json();
+      setChat((items) => [
+        ...items,
+        { role: "agent", text: data.response ?? data.answer ?? "The AMD agent returned no response." },
+      ]);
+      setApiMode("Local API connected");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Unknown request error.";
+      let userMessage: string;
+
+      if (detail === "FORGEMIND_PROVIDER_RATE_LIMITED") {
+        userMessage =
+          "The AI provider is temporarily rate-limited. Please wait briefly and retry. No maintenance action was performed.";
+      } else if (detail === "FORGEMIND_PROVIDER_UNAVAILABLE") {
+        userMessage =
+          "The AI provider is temporarily unavailable. Please retry shortly. No maintenance action was performed.";
+      } else if (error instanceof TypeError) {
+        userMessage =
+          "Could not connect to the assistant API. Check that the backend is running and that VITE_AGENT_API_URL is correct. No maintenance action was performed.";
+      } else {
+        userMessage = `The assistant request failed: ${detail} No maintenance action was performed. Check the backend terminal for details.`;
+      }
+
+      setChat((items) => [...items, { role: "agent", text: userMessage }]);
+    } finally {
+      setIsSending(false);
+    }
   }
 
   const pageTitle = page === "Machine detail" ? `${currentMachine.id} · Machine detail` : page;
@@ -189,7 +365,7 @@ function App() {
       <p className="side-label">WORKSPACE</p>
       <nav className="space-y-1" aria-label="Main navigation">{navItems.map(({ label, icon: Icon }) => <button key={label} onClick={() => { setPage(label); setMobileNav(false); }} className={`nav-item ${page === label || (page === "Machine detail" && label === "Machines") ? "nav-active" : ""}`}><Icon size={17}/><span>{label}</span>{label === "Predictions" && <span className="ml-auto rounded-full bg-rose-400/15 px-1.5 py-0.5 text-[10px] font-semibold text-rose-300">3</span>}</button>)}</nav>
       <p className="side-label mt-8">SYSTEM</p><button className="nav-item" onClick={() => showNotice("Settings are managed by your workspace administrator.")}><Settings2 size={17}/><span>Settings</span></button>
-      <div className="sidebar-bottom"><div className="agent-status"><div className="flex items-center gap-2"><span className={`size-2 rounded-full ${apiMode.includes("connected") ? "bg-emerald-400" : "bg-amber-300"}`} /><span className="text-xs font-medium text-slate-200">{apiMode}</span></div><p className="mt-2 text-[10px] leading-relaxed text-slate-500">{apiMode === "Demo data" ? "Sample telemetry · Configure the AMD agent API to connect." : "Maintenance copilot ready"}</p><div className="mt-3 flex items-center gap-1.5 text-[10px] text-slate-600"><ShieldCheck size={12}/>Secure connection</div></div><div className="profile-row"><div className="avatar">RM</div><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-slate-200">Reliability Manager</p><p className="mt-0.5 text-[10px] text-slate-500">Operations team</p></div><ChevronDown size={14} className="text-slate-500"/></div></div>
+      <div className="sidebar-bottom"><div className="agent-status"><div className="flex items-center gap-2"><span className={`size-2 rounded-full ${apiMode.includes("connected") ? "bg-emerald-400" : "bg-amber-300"}`} /><span className="text-xs font-medium text-slate-200">{apiMode}</span></div><p className="mt-2 text-[10px] leading-relaxed text-slate-500">{apiMode === "Demo data" ? "Demo mode · Configure VITE_AGENT_API_URL for the local backend." : "FastAPI + AMD assistant connected · synthetic demo data"}</p><div className="mt-3 flex items-center gap-1.5 text-[10px] text-slate-600"><ShieldCheck size={12}/>Secure connection</div></div><div className="profile-row"><div className="avatar">RM</div><div className="min-w-0 flex-1"><p className="truncate text-xs font-medium text-slate-200">Reliability Manager</p><p className="mt-0.5 text-[10px] text-slate-500">Operations team</p></div><ChevronDown size={14} className="text-slate-500"/></div></div>
     </aside>
 
     <div className="main-column">
@@ -198,10 +374,10 @@ function App() {
       <main className="page-content">
         {page === "Overview" && <Overview onOpen={openMachine} onNavigate={setPage}/>}
         {page === "Machines" && <MachinesPage filtered={filteredMachines} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} onOpen={openMachine}/>}
-        {page === "Machine detail" && <MachineDetail machine={currentMachine} sensor={sensorAssets[currentMachine.id]} onAction={showNotice} onNavigate={setPage}/>}
+        {page === "Machine detail" && <MachineDetail machine={currentMachine} sensor={sensorAssets[currentMachine.id]} analysis={analysis} onAction={showNotice} onNavigate={setPage}/>}
         {page === "Predictions" && <Predictions onOpen={openMachine}/>}
-        {page === "Maintenance" && <MaintenancePage onAction={showNotice}/>}
-        {page === "Assistant" && <AssistantPage chat={chat} message={message} setMessage={setMessage} onSend={sendMessage} onSchedule={() => showNotice("Maintenance request created for M17 · proposed window: next 48 hours.")}/>}
+        {page === "Maintenance" && <MaintenancePage onAction={showNotice} decisions={decisions}/>}
+        {page === "Assistant" && <AssistantPage chat={chat} message={message} setMessage={setMessage} machine={currentMachine} analysis={analysis} isSending={isSending} onSend={sendMessage}/>}
         {page === "Data sources" && <DataSourcesPage sensorCount={Object.keys(sensorAssets).length} datasetState={datasetState}/>}
       </main>
     </div>
@@ -237,7 +413,7 @@ function MachinesPage({ filtered, filter, setFilter, query, setQuery, onOpen }: 
 
 function Signal({ value }: { value: string }) { const risk = value === "High"; const elevated = value === "Elevated"; return <span className={`text-[11px] ${risk ? "text-rose-300" : elevated ? "text-amber-300" : "text-slate-500"}`}>{value}</span>; }
 
-function MachineDetail({ machine, sensor, onAction, onNavigate }: { machine: Machine; sensor?: SensorAsset; onAction: (text: string) => void; onNavigate: (page: Page) => void }) {
+function MachineDetail({ machine, sensor, analysis, onAction, onNavigate }: { machine: Machine; sensor?: SensorAsset; analysis: AnalysisState; onAction: (text: string) => void; onNavigate: (page: Page) => void }) {
   const severity = machine.status === "Critical";
   const samples = sensor?.points;
   const latest = samples?.[samples.length - 1];
@@ -245,15 +421,100 @@ function MachineDetail({ machine, sensor, onAction, onNavigate }: { machine: Mac
   const vibrationPoints = samples?.map((point) => Number(point.vibration.toFixed(2)));
   const temperaturePoints = samples?.map((point) => Number(point.temperature.toFixed(1)));
   const currentPoints = samples?.map((point) => Number(point.current.toFixed(1)));
-  return <><PageHeading eyebrow={<button onClick={() => onNavigate("Machines")} className="hover:text-emerald-200">MACHINES / </button>} title={`${machine.id} — ${machine.name}`} subtitle={`${machine.type} · North Plant · Line 01`} action={<div className="flex gap-2"><button className="outline-button" onClick={() => onAction(`Maintenance scheduled for ${machine.id}.`)}><CalendarDays size={14}/>Schedule</button><button className="primary-button" onClick={() => onNavigate("Assistant")}><Bot size={14}/>Ask agent</button></div>}/><div className="mb-4 flex flex-wrap items-center gap-3"><StatusPill status={machine.status}/><span className="text-[11px] text-slate-500">Last maintenance {machine.maintenance}</span><span className="ml-auto flex items-center gap-1.5 text-[10px] text-slate-600"><span className="live-dot"/>Telemetry updated just now</span></div><div className="grid grid-cols-2 gap-3 xl:grid-cols-5"><MetricCard label="Demo health score" value={`${machine.health}%`} detail="Sample dashboard value" icon={Gauge} tone={severity ? "red" : "green"}/><MetricCard label="Demo failure risk" value={`${machine.probability}%`} detail="Not calculated from CSV" icon={Activity} tone="red"/><MetricCard label="Vibration" value={latest ? `${latest.vibration.toFixed(1)} mm/s` : "2.4 mm/s"} detail={sensor ? `${sensor.rows.toLocaleString()} CSV samples` : "Baseline · 2.1 mm/s"} icon={Activity} tone="amber" delta={sensor ? undefined : "↑ 148%"}/><MetricCard label="Temperature" value={latest ? `${latest.temperature.toFixed(1)}°C` : "67°C"} detail={sensor ? "Source: sensor_readings.csv" : "Operating limit · 90°C"} icon={Thermometer} tone="amber" delta={sensor ? undefined : "↑ 23°C"}/><MetricCard label="Motor current" value={latest ? `${latest.current.toFixed(1)} A` : "26 A"} detail="Sensor reading" icon={Zap} tone="amber"/></div>{sensor && <div className="mt-3 rounded-lg border border-amber-300/10 bg-amber-300/[0.035] px-4 py-3 text-[10px] leading-relaxed text-amber-100/60">Sensor charts use the provided CSV samples. Demo risk scores are illustrative and are not calculated from this sensor file.</div>}<div className="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-2"><TrendChart kind="Vibration" points={vibrationPoints ?? [2.1,2.3,2.5,2.6,2.9,3.1,3.8,4.1,4.4,5.2]} labels={sensorLabels ?? ["00:00","04:00","08:00","12:00","16:00","Now"]} color="text-amber-300" unit="mm/s" min={1.5} max={5.8}/><TrendChart kind="Temperature" points={temperaturePoints ?? [61,62,63,64,66,68,73,76,79,84]} labels={sensorLabels ?? ["00:00","04:00","08:00","12:00","16:00","Now"]} color="text-rose-300" unit="°C" min={55} max={90}/></div><div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-[1.2fr_.8fr]"><TrendChart kind="Motor current" points={currentPoints ?? [18,18.5,19,19.5,20,21,22,23,24,26]} labels={sensorLabels ?? ["00:00","04:00","08:00","12:00","16:00","Now"]} color="text-sky-300" unit="A" min={16} max={28}/><section className="panel"><div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">Agent assessment</h2><p className="mt-1 text-[11px] text-slate-500">Reasoning summary · predictive model</p></div><Bot size={16} className="text-emerald-300"/></div><div className="px-5 pb-5"><div className="rounded-xl border border-rose-400/15 bg-rose-400/[0.055] p-4"><p className="text-[10px] font-semibold uppercase tracking-wider text-rose-300">Likely component</p><p className="mt-1 text-sm font-semibold text-white">Motor bearing degradation</p><p className="mt-2 text-xs leading-relaxed text-slate-400">{sensor ? "CSV sensor history is shown in the charts. The displayed risk assessment is sample UI data until a prediction model is connected." : "Vibration, temperature, and current are trending upward together. Inspection history also notes bearing wear."}</p></div><div className="mt-4 flex items-center justify-between text-xs"><span className="text-slate-500">Estimated failure</span><span className="font-semibold text-white">~2 days</span></div><button onClick={() => onNavigate("Assistant")} className="mt-4 w-full rounded-lg border border-white/[0.08] bg-white/[0.035] py-2.5 text-xs font-medium text-slate-200 transition hover:bg-white/[0.07]">Ask why this is at risk <ArrowRight size={13} className="ml-2 inline"/></button></div></section></div></>;
+  const analysisSummary = analysis.status === "ready" && analysis.data ? analysis.data.analysis : undefined;
+  return <><PageHeading eyebrow={<button onClick={() => onNavigate("Machines")} className="hover:text-emerald-200">MACHINES / </button>} title={`${machine.id} — ${machine.name}`} subtitle={`${machine.type} · North Plant · Line 01`} action={<div className="flex gap-2"><button className="outline-button" onClick={() => onAction(`Maintenance scheduled for ${machine.id}.`)}><CalendarDays size={14}/>Schedule</button><button className="primary-button" onClick={() => onNavigate("Assistant")}><Bot size={14}/>Ask agent</button></div>}/><div className="mb-4 flex flex-wrap items-center gap-3"><StatusPill status={machine.status}/><span className="text-[11px] text-slate-500">Last maintenance {machine.maintenance}</span><span className="ml-auto flex items-center gap-1.5 text-[10px] text-slate-600"><span className="live-dot"/>Telemetry updated just now</span></div><div className="grid grid-cols-2 gap-3 xl:grid-cols-5"><MetricCard label="Illustrative health score" value={`${machine.health}%`} detail="Demo UI value · not a model output" icon={Gauge} tone={severity ? "red" : "green"}/><MetricCard label="Illustrative failure risk" value={`${machine.probability}%`} detail="Demo UI value · not a prediction" icon={Activity} tone="red"/><MetricCard label="Vibration" value={latest ? `${latest.vibration.toFixed(1)} mm/s` : "2.4 mm/s"} detail={sensor ? `${sensor.rows.toLocaleString()} CSV samples` : "No observed sample loaded"} icon={Activity} tone="amber" delta={sensor ? undefined : undefined}/><MetricCard label="Temperature" value={latest ? `${latest.temperature.toFixed(1)}°C` : "Unavailable"} detail={sensor ? "Observed CSV reading" : "No observed sample loaded"} icon={Thermometer} tone="amber"/><MetricCard label="Motor current" value={latest ? `${latest.current.toFixed(1)} A` : "Unavailable"} detail={sensor ? "Observed CSV reading" : "No observed sample loaded"} icon={Zap} tone="amber"/></div>{sensor && <div className="mt-3 rounded-lg border border-amber-300/10 bg-amber-300/[0.035] px-4 py-3 text-[10px] leading-relaxed text-amber-100/60">Sensor charts use observed CSV samples. The health and risk values above are illustrative UI values, not predictions. Threshold checks below are configurable demo checks and are not validated operational limits.</div>}{analysis.status === "loading" && <div className="mt-3 rounded-lg border border-white/[0.08] bg-white/[0.025] px-4 py-3 text-[10px] text-slate-500">Loading deterministic sensor analysis…</div>}{analysis.status === "unavailable" && <div className="mt-3 rounded-lg border border-rose-300/10 bg-rose-300/[0.035] px-4 py-3 text-[10px] text-rose-200/70">{analysis.error ?? "Sensor analysis unavailable."}</div>}{analysisSummary && <div className="mt-3 rounded-lg border border-amber-300/10 bg-amber-300/[0.035] px-4 py-3 text-[10px] text-amber-100/70"><span className="font-semibold text-amber-200">Deterministic analysis:</span> {(["vibration", "temperature", "current"] as const).map((name) => `${name} ${analysisSummary.thresholdFlags[name].flagged ? "flagged" : "within demo threshold"}`).join(" · ")} <span className="text-amber-100/50">· Thresholds are unvalidated demo checks.</span></div>}<div className="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-2"><TrendChart kind="Vibration" points={vibrationPoints ?? [2.1,2.3,2.5,2.6,2.9,3.1,3.8,4.1,4.4,5.2]} labels={sensorLabels ?? ["00:00","04:00","08:00","12:00","16:00","Now"]} color="text-amber-300" unit="mm/s" min={1.5} max={5.8}/><TrendChart kind="Temperature" points={temperaturePoints ?? [61,62,63,64,66,68,73,76,79,84]} labels={sensorLabels ?? ["00:00","04:00","08:00","12:00","16:00","Now"]} color="text-rose-300" unit="°C" min={55} max={90}/></div><div className="mt-3 grid grid-cols-1 gap-3 xl:grid-cols-[1.2fr_.8fr]"><TrendChart kind="Motor current" points={currentPoints ?? [18,18.5,19,19.5,20,21,22,23,24,26]} labels={sensorLabels ?? ["00:00","04:00","08:00","12:00","16:00","Now"]} color="text-sky-300" unit="A" min={16} max={28}/><section className="panel"><div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">Agent assessment</h2><p className="mt-1 text-[11px] text-slate-500">No predictive model connected</p></div><Bot size={16} className="text-emerald-300"/></div><div className="px-5 pb-5"><div className="rounded-xl border border-rose-400/15 bg-rose-400/[0.055] p-4"><p className="text-[10px] font-semibold uppercase tracking-wider text-rose-300">Illustrative scenario</p><p className="mt-1 text-sm font-semibold text-white">Motor bearing degradation</p><p className="mt-2 text-xs leading-relaxed text-slate-400">{sensor ? "Observed CSV sensor history is shown in the charts. The displayed component and risk assessment are sample UI data; the AMD model and ML predictor are not connected." : "No observed sensor history is loaded, and no AI diagnosis is available."}</p></div><div className="mt-4 flex items-center justify-between text-xs"><span className="text-slate-500">Estimated failure</span><span className="font-semibold text-white">Illustrative only</span></div><button onClick={() => onNavigate("Assistant")} className="mt-4 w-full rounded-lg border border-white/[0.08] bg-white/[0.035] py-2.5 text-xs font-medium text-slate-200 transition hover:bg-white/[0.07]">Ask about observed data <ArrowRight size={13} className="ml-2 inline"/></button></div></section></div></>;
 }
 
 function Predictions({ onOpen }: { onOpen: (id: string) => void }) {
   return <><PageHeading eyebrow="Predictive analytics" title="Failure predictions" subtitle="Prioritized machine risks with explainable contributing factors." action={<button className="outline-button"><Clock3 size={14}/>Next 7 days<ChevronDown size={13}/></button>}/><div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.35fr_.65fr]"><section className="panel"><div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">Priority queue</h2><p className="mt-1 text-[11px] text-slate-500">Machines ranked by probability and impact</p></div><span className="rounded-full bg-rose-400/10 px-2.5 py-1 text-[10px] font-semibold text-rose-300">3 require action</span></div><div className="divide-y divide-white/[0.055]">{machines.filter((m) => m.probability > 50).sort((a,b) => b.probability-a.probability).map((m) => <button key={m.id} onClick={() => onOpen(m.id)} className="risk-row"><div className="risk-score"><span>{m.probability}</span><small>%</small></div><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className="text-xs font-semibold text-white">{m.id} · {m.name}</span><StatusPill status={m.status}/></div><p className="mt-1.5 text-[10px] text-slate-500">{m.id === "M17" ? "Motor bearing · estimated failure in ~2 days" : "Drive assembly · estimated failure within 5 days"}</p><div className="mt-3 h-1 overflow-hidden rounded-full bg-white/[0.07]"><div className="h-full rounded-full bg-rose-400" style={{width:`${m.probability}%`}}/></div></div><ArrowUpRight className="ml-2 size-4 shrink-0 text-slate-600"/></button>)}</div></section><section className="panel"><div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">M17 risk factors</h2><p className="mt-1 text-[11px] text-slate-500">Model contribution summary</p></div><span className="text-[10px] text-slate-600">91% risk</span></div><div className="space-y-5 px-5 pb-5">{[{label:"Vibration trend",value:92,tone:"bg-rose-300"},{label:"Temperature rise",value:84,tone:"bg-rose-300"},{label:"Motor current",value:78,tone:"bg-amber-300"},{label:"Maintenance age",value:72,tone:"bg-amber-300"},{label:"Recent errors",value:48,tone:"bg-sky-300"}].map((factor) => <div key={factor.label}><div className="mb-2 flex justify-between text-[11px]"><span className="text-slate-400">{factor.label}</span><span className="font-medium text-slate-300">{factor.value >= 70 ? "HIGH" : "MEDIUM"}</span></div><div className="h-1.5 rounded-full bg-white/[0.06]"><div className={`h-full rounded-full ${factor.tone}`} style={{width:`${factor.value}%`}}/></div></div>)}<div className="rounded-xl border border-white/[0.06] bg-white/[0.025] p-3 text-[10px] leading-relaxed text-slate-500"><ShieldCheck size={13} className="mr-1 inline text-emerald-300"/>Predictions are estimates. Verify with an inspection before taking a machine offline.</div></div></section></div><div className="mt-4"><section className="panel"><div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">Recent model runs</h2><p className="mt-1 text-[11px] text-slate-500">Latest scored assets</p></div><button className="icon-link" aria-label="Prediction settings"><Settings2 size={15}/></button></div><div className="overflow-x-auto"><table className="data-table"><thead><tr><th>Machine</th><th>Predicted component</th><th>Probability</th><th>Failure window</th><th>Last scored</th></tr></thead><tbody><tr onClick={() => onOpen("M17")} className="cursor-pointer"><td className="font-semibold text-slate-200">M17 · Compressor</td><td>Motor bearing</td><td className="font-semibold text-rose-300">91%</td><td>~2 days</td><td>8 minutes ago</td></tr><tr onClick={() => onOpen("M42")} className="cursor-pointer"><td className="font-semibold text-slate-200">M42 · Pump</td><td>Drive coupling</td><td className="font-semibold text-amber-300">73%</td><td>~5 days</td><td>12 minutes ago</td></tr><tr onClick={() => onOpen("M63")} className="cursor-pointer"><td className="font-semibold text-slate-200">M63 · Motor</td><td>Rotor assembly</td><td className="font-semibold text-amber-300">61%</td><td>~6 days</td><td>21 minutes ago</td></tr></tbody></table></div></section></div></>;
 }
 
-function MaintenancePage({ onAction }: { onAction: (text: string) => void }) {
-  return <><PageHeading eyebrow="Reliability operations" title="Maintenance & inventory" subtitle="Plan the next intervention with parts, suppliers, and production impact in view." action={<button className="primary-button" onClick={() => onAction("Maintenance request created for M17.")}><CalendarDays size={14}/>Schedule maintenance</button>}/><div className="grid grid-cols-2 gap-3 xl:grid-cols-4"><MetricCard label="M17 maintenance spend" value="$2,450" detail="Lifetime recorded cost" icon={Wrench}/><MetricCard label="Downtime recorded" value="18 hrs" detail="Across 4 service events" icon={Clock3} tone="amber"/><MetricCard label="Bearing stock" value="4 units" detail="Reorder threshold · 3" icon={Package} tone="green"/><MetricCard label="Supplier lead time" value="4 days" detail="Industrial Parts Ltd." icon={Factory}/></div><div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[1.05fr_.95fr]"><section className="panel"><div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">M17 maintenance history</h2><p className="mt-1 text-[11px] text-slate-500">Industrial compressor · service record</p></div><button className="outline-button" onClick={() => onAction("Maintenance history exported.")}>Export<ArrowUpRight size={13}/></button></div><div className="relative px-5 pb-5"><div className="timeline-line"/>{history.map(({date,kind,note,icon:Icon}) => <div className="timeline-item" key={date}><span className="timeline-icon"><Icon size={14}/></span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center justify-between gap-1"><p className="text-xs font-medium text-slate-200">{kind}</p><time className="text-[10px] text-slate-600">{date}</time></div><p className="mt-1 text-[11px] text-slate-500">{note}</p></div></div>)}</div></section><div className="space-y-4"><section className="panel"><div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">Required part</h2><p className="mt-1 text-[11px] text-slate-500">Recommended for predicted repair</p></div><span className="rounded-full bg-emerald-400/10 px-2.5 py-1 text-[10px] font-medium text-emerald-300">In stock</span></div><div className="px-5 pb-5"><div className="flex items-center gap-3"><div className="part-icon"><Package size={20}/></div><div><p className="text-sm font-semibold text-white">Motor Bearing</p><p className="mt-1 text-[10px] text-slate-500">Part BRG-6205 · Industrial grade</p></div></div><div className="mt-4 grid grid-cols-2 gap-3">{[["Available","4 units"],["Reorder level","3 units"],["Supplier","Industrial Parts Ltd."],["Lead time","4 days"],["Unit price","$85.00"],["Reliability","96%"]].map(([k,v]) => <div key={k} className="rounded-lg bg-white/[0.025] p-3"><p className="text-[9px] uppercase tracking-wider text-slate-600">{k}</p><p className="mt-1.5 text-xs font-medium text-slate-300">{v}</p></div>)}</div><div className="mt-4 grid grid-cols-2 gap-2"><button className="primary-button justify-center" onClick={() => onAction("Maintenance scheduled for M17 within 48 hours.")}><CalendarDays size={14}/>Schedule</button><button className="outline-button justify-center" onClick={() => onAction("Purchase order draft created for 2 × BRG-6205.")}><Package size={14}/>Order part</button></div></div></section><section className="panel p-5"><div className="flex items-center gap-2"><Zap size={15} className="text-amber-300"/><h2 className="text-sm font-semibold text-white">Production economics</h2></div><div className="mt-4 grid grid-cols-2 gap-4"><div><p className="text-[10px] text-slate-500">Production rate</p><p className="mt-1 text-sm font-medium text-slate-200">120 units / hr</p></div><div><p className="text-[10px] text-slate-500">Downtime cost</p><p className="mt-1 text-sm font-medium text-slate-200">$2,200 / hr</p></div></div><div className="mt-4 rounded-xl border border-rose-400/15 bg-rose-400/[0.055] p-4"><div className="flex items-center justify-between"><span className="text-xs text-slate-400">Failure exposure · ~18h downtime</span><span className="text-lg font-semibold text-rose-300">$39,600+</span></div><div className="my-3 h-px bg-white/[0.07]"/><div className="flex items-center justify-between"><span className="text-xs text-slate-400">Planned repair estimate</span><span className="text-sm font-semibold text-emerald-300">$2,450</span></div></div></section></div></div></>;
+function MaintenancePage({ onAction, decisions }: { onAction: (text: string) => void; decisions: DecisionState }) {
+  const formatINR = (amount: number) => new Intl.NumberFormat("en-IN", {
+    style: "currency",
+    currency: "INR",
+    maximumFractionDigits: 0,
+  }).format(amount);
+
+  const optionLabels: Record<string, string> = {
+    immediate_replacement: "Immediate replacement",
+    scheduled_replacement: "Scheduled replacement",
+    continue_monitoring: "Continue monitoring",
+  };
+
+  return <>
+    <PageHeading
+      eyebrow="Reliability operations"
+      title="Maintenance & inventory"
+      subtitle="Compare maintenance options, costs, and operational trade-offs."
+      action={<button className="primary-button" onClick={() => onAction("Maintenance review requested. Human approval is required.")}><CalendarDays size={14}/>Request review</button>}
+    />
+
+    <section className="panel mb-4 overflow-hidden">
+      <div className="panel-heading">
+        <div>
+          <h2 className="text-sm font-semibold text-white">Maintenance decision analysis</h2>
+          <p className="mt-1 text-[11px] text-slate-500">Part {decisions.data?.part_id ?? "BR-204"} · Cost comparison</p>
+        </div>
+        <span className="rounded-full bg-amber-400/10 px-2.5 py-1 text-[10px] font-semibold text-amber-300">Provisional</span>
+      </div>
+
+      {decisions.status === "loading" && <p className="px-5 pb-5 text-xs text-slate-400">Loading decision options from the backend…</p>}
+      {decisions.status === "unavailable" && <div className="px-5 pb-5 text-xs text-rose-300">{decisions.error ?? "Decision data unavailable."}</div>}
+
+      {decisions.status === "ready" && decisions.data && <div className="space-y-4 px-5 pb-5">
+        <div className="rounded-xl border border-amber-300/15 bg-amber-300/[0.045] p-4">
+          <div className="flex items-center gap-2 text-amber-200"><CircleAlert size={16}/><span className="text-xs font-semibold">No operational recommendation selected</span></div>
+          <p className="mt-2 text-xs leading-relaxed text-slate-400">{decisions.data?.decision_explanation}</p>
+          <p className="mt-2 text-[10px] text-slate-500">Data status: {decisions.data?.data_status} · Failure risk: {decisions.data.risk_assessment}</p>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+          {decisions.data?.options.map((option) => <article key={option.name} className="rounded-xl border border-white/[0.08] bg-white/[0.02] p-4">
+            <p className="text-xs font-semibold text-white">{optionLabels[option.name] ?? option.name}</p>
+            <p className="mt-3 text-2xl font-semibold tracking-tight text-white">{formatINR(option.total_cost_inr)}</p>
+            <p className="mt-1 text-[10px] text-slate-500">Estimated immediate cost</p>
+            <div className="my-4 h-px bg-white/[0.07]"/>
+            <div className="space-y-3 text-xs">
+              <div className="flex justify-between gap-3"><span className="text-slate-500">Part cost</span><span className="text-slate-300">{formatINR(option.part_cost_inr)}</span></div>
+              <div className="flex justify-between gap-3"><span className="text-slate-500">Downtime cost</span><span className="text-slate-300">{formatINR(option.downtime_cost_inr)}</span></div>
+              <div className="flex justify-between gap-3"><span className="text-slate-500">Downtime</span><span className="text-slate-300">{option.downtime_hours} hours</span></div>
+              <div className="flex justify-between gap-3"><span className="text-slate-500">Lead time</span><span className="text-slate-300">{option.lead_time_days === 0 ? "Immediate" : `${option.lead_time_days} days`}</span></div>
+              <div className="flex justify-between gap-3"><span className="text-slate-500">Stock available</span><span className="text-slate-300">{option.stock_available ? "Yes" : "No"}</span></div>
+            </div>
+            <p className="mt-4 text-[11px] leading-relaxed text-slate-400">{option.trade_off}</p>
+            {option.name === decisions.data?.lowest_immediate_cost_option && <p className="mt-3 rounded-lg bg-sky-400/10 px-3 py-2 text-[10px] text-sky-200">Lowest immediate cost only — not a safety recommendation.</p>}
+          </article>)}
+        </div>
+
+        <div className="rounded-xl border border-rose-300/15 bg-rose-300/[0.035] p-4">
+          <div className="flex items-center gap-2 text-rose-200"><ShieldCheck size={15}/><p className="text-xs font-semibold">Human approval required</p></div>
+          <p className="mt-2 text-[11px] leading-relaxed text-slate-400">{decisions.data.requires_human_approval ? "No maintenance or procurement action is automatically approved. A qualified person must review the options." : "Check the backend approval policy before taking action."}</p>
+        </div>
+
+        <details className="rounded-xl border border-white/[0.07] p-4">
+          <summary className="cursor-pointer text-xs font-medium text-slate-300">Demo assumptions and limitations</summary>
+          <ul className="mt-3 list-disc space-y-2 pl-5 text-[10px] leading-relaxed text-slate-500">{decisions.data.assumptions.map((assumption) => <li key={assumption}>{assumption}</li>)}</ul>
+        </details>
+      </div>}
+    </section>
+
+    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.05fr_.95fr]">
+      <section className="panel">
+        <div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">M17 maintenance history</h2><p className="mt-1 text-[11px] text-slate-500">Industrial compressor · sample service record</p></div><button className="outline-button" onClick={() => onAction("Maintenance history export requested.")}>Export<ArrowUpRight size={13}/></button></div>
+        <div className="relative px-5 pb-5"><div className="timeline-line"/>{history.map(({date,kind,note,icon:Icon}) => <div className="timeline-item" key={date}><span className="timeline-icon"><Icon size={14}/></span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center justify-between gap-1"><p className="text-xs font-medium text-slate-200">{kind}</p><time className="text-[10px] text-slate-600">{date}</time></div><p className="mt-1 text-[11px] text-slate-500">{note}</p></div></div>)}</div>
+      </section>
+      <section className="panel p-5">
+        <div className="flex items-center gap-2"><Zap size={15} className="text-amber-300"/><h2 className="text-sm font-semibold text-white">Decision constraints</h2></div>
+        <div className="mt-4 space-y-3 text-xs leading-relaxed text-slate-400">
+          <p>Cost estimates are synthetic demo values in Indian rupees (INR).</p>
+          <p>Monitoring's immediate cost excludes future repairs, production losses, and unquantified failure risk.</p>
+          <p>Supplier lead time and waiting-related operational risk have not been validated.</p>
+          <p className="text-amber-200">Use these options for demonstration only. They are not approved maintenance instructions.</p>
+        </div>
+      </section>
+    </div>
+  </>;
 }
 
 function DataSourcesPage({ sensorCount, datasetState }: { sensorCount: number; datasetState: "loading" | "ready" | "unavailable" }) {
@@ -271,7 +532,111 @@ function DataSourcesPage({ sensorCount, datasetState }: { sensorCount: number; d
   </>;
 }
 
-function AssistantPage({ chat, message, setMessage, onSend, onSchedule }: { chat: {role:"user"|"agent";text:string}[]; message: string; setMessage: (text:string)=>void; onSend: (event:FormEvent<HTMLFormElement>)=>void; onSchedule: ()=>void }) {
+function AssistantPage({ chat, message, setMessage, machine, analysis, isSending, onSend }: {
+  chat: { role: "user" | "agent"; text: string }[];
+  message: string;
+  setMessage: (text: string) => void;
+  machine: Machine;
+  analysis: AnalysisState;
+  isSending: boolean;
+  onSend: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  const summary = analysis.data?.analysis;
+
+  return <>
+    <PageHeading
+      eyebrow="Maintenance copilot"
+      title="AI assistant"
+      subtitle="Investigate observed machine signals and compare provisional maintenance options."
+      action={<span className="flex items-center gap-2 rounded-full border border-emerald-300/15 bg-emerald-300/[0.05] px-3 py-1.5 text-[10px] text-emerald-200"><span className="live-dot" />AMD-hosted assistant</span>}
+    />
+    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_300px]">
+      <section className="panel flex min-h-[560px] flex-col">
+        <div className="panel-heading">
+          <div className="flex items-center gap-3">
+            <div className="agent-avatar"><Bot size={18} /></div>
+            <div>
+              <h2 className="text-sm font-semibold text-white">ForgeMind maintenance copilot</h2>
+              <p className="mt-1 text-[10px] text-slate-500">Context: {machine.id} · {machine.name}</p>
+            </div>
+          </div>
+          <span className="rounded-full bg-white/[0.04] px-2 py-1 text-[9px] text-slate-500">
+            {analysis.status === "ready" ? "Analysis ready" : analysis.status === "loading" ? "Loading analysis" : "Analysis unavailable"}
+          </span>
+        </div>
+
+        <div className="flex-1 space-y-5 overflow-y-auto p-5">
+          {chat.map((item, index) => item.role === "user" ? (
+            <div key={index} className="flex justify-end">
+              <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-emerald-300 px-4 py-3 text-xs leading-relaxed text-[#07110e]">{item.text}</div>
+            </div>
+          ) : (
+            <div key={index} className="flex items-start gap-3">
+              <div className="agent-avatar small"><Bot size={14} /></div>
+              <div className="markdown-answer max-w-[95%] min-w-0 rounded-2xl rounded-tl-sm border border-white/[0.065] bg-white/[0.025] px-4 py-3.5 text-xs leading-[1.8] text-slate-300">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  components={{
+                    h1: ({ children }) => <h1 className="mb-3 mt-1 text-base font-semibold text-white">{children}</h1>,
+                    h2: ({ children }) => <h2 className="mb-2 mt-4 text-sm font-semibold text-white">{children}</h2>,
+                    h3: ({ children }) => <h3 className="mb-2 mt-4 text-xs font-semibold uppercase tracking-wide text-emerald-200">{children}</h3>,
+                    p: ({ children }) => <p className="mb-3 last:mb-0">{children}</p>,
+                    strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
+                    ul: ({ children }) => <ul className="mb-3 list-disc space-y-1 pl-5 last:mb-0">{children}</ul>,
+                    ol: ({ children }) => <ol className="mb-3 list-decimal space-y-1 pl-5 last:mb-0">{children}</ol>,
+                    li: ({ children }) => <li className="pl-1">{children}</li>,
+                    table: ({ children }) => <div className="mb-3 max-w-full overflow-x-auto rounded-lg border border-white/10"><table className="w-full min-w-[420px] border-collapse text-left text-[11px]">{children}</table></div>,
+                    thead: ({ children }) => <thead className="bg-white/[0.06] text-slate-100">{children}</thead>,
+                    th: ({ children }) => <th className="border-b border-white/10 px-3 py-2 font-semibold">{children}</th>,
+                    td: ({ children }) => <td className="border-b border-white/[0.06] px-3 py-2 align-top">{children}</td>,
+                    code: ({ children }) => <code className="rounded bg-white/[0.07] px-1 py-0.5 font-mono text-[10px] text-emerald-200">{children}</code>,
+                    blockquote: ({ children }) => <blockquote className="mb-3 border-l-2 border-emerald-300/50 pl-3 text-slate-400">{children}</blockquote>,
+                    hr: () => <hr className="my-4 border-white/10" />,
+                  }}
+                >
+                  {item.text}
+                </ReactMarkdown>
+              </div>
+            </div>
+          ))}
+          {isSending && <div className="flex items-center gap-3 text-xs text-slate-400" role="status" aria-live="polite"><div className="agent-avatar small"><Bot size={14} /></div><span className="inline-flex items-center gap-2"><span className="size-1.5 animate-pulse rounded-full bg-emerald-300" />Analyzing sensor evidence and maintenance options…</span></div>}
+        </div>
+
+        <div className="border-t border-white/[0.06] p-4">
+          <div className="mb-3 flex flex-wrap gap-2">
+            {[`Why is ${machine.id} at high risk?`, "Review observed sensor changes", "Estimate downtime cost"].map((prompt) => <button key={prompt} onClick={() => setMessage(prompt)} disabled={isSending} className="rounded-full border border-white/[0.07] px-3 py-1.5 text-[10px] text-slate-400 transition hover:border-white/15 hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-50">{prompt}</button>)}
+          </div>
+          <form onSubmit={onSend} className="flex items-center gap-2 rounded-xl border border-white/[0.08] bg-[#0b0f10] p-2">
+            <input value={message} onChange={(event) => setMessage(event.target.value)} disabled={isSending} placeholder="Ask about observed signals or maintenance…" className="min-w-0 flex-1 bg-transparent px-2 py-2 text-xs text-slate-200 outline-none placeholder:text-slate-600 disabled:opacity-60" />
+            <button className="rounded-lg bg-emerald-300 p-2.5 text-[#07110e] transition hover:bg-emerald-200 disabled:cursor-wait disabled:opacity-50" type="submit" disabled={isSending || !message.trim()} aria-label="Send message"><Send size={15} /></button>
+          </form>
+          <p className="mt-2 px-1 text-[9px] text-slate-600">Responses use synthetic demo data. Failure risk is unvalidated; human approval is required for operational action.</p>
+        </div>
+      </section>
+
+      <aside className="space-y-4">
+        <section className="panel">
+          <div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">Machine context</h2><p className="mt-1 text-[10px] text-slate-500">Observed and derived local analysis</p></div><Cpu size={15} className="text-slate-500" /></div>
+          <div className="space-y-3 px-5 pb-5">
+            <div className="flex justify-between gap-3 text-[10px]"><span className="text-slate-500">Asset</span><span className="text-right text-slate-300">{machine.id} · {machine.type}</span></div>
+            {summary ? <>
+              <div className="flex justify-between gap-3 text-[10px]"><span className="text-slate-500">Analysis</span><span className="text-right text-emerald-300">Deterministic</span></div>
+              <div className="flex justify-between gap-3 text-[10px]"><span className="text-slate-500">Threshold checks</span><span className="text-right text-amber-200">Unvalidated demo</span></div>
+            </> : <div className="text-[10px] text-slate-500">{analysis.error ?? "Analysis is not available."}</div>}
+          </div>
+        </section>
+        <section className="panel p-5">
+          <div className="flex items-center gap-2"><Settings2 size={15} className="text-emerald-300" /><h2 className="text-sm font-semibold text-white">Connected capabilities</h2></div>
+          <p className="mt-2 text-[10px] leading-relaxed text-slate-500">The AMD-hosted assistant can call backend tools for sensor analysis, maintenance cost comparison, and failure-risk availability checks.</p>
+          <div className="mt-4 space-y-2">{["analyze_machine()", "compare_maintenance_options()", "get_failure_risk()"].map((tool) => <div key={tool} className="rounded-lg bg-white/[0.025] px-3 py-2 font-mono text-[9px] text-slate-400"><span className="mr-2 text-emerald-300">›</span>{tool}</div>)}</div>
+        </section>
+        <section className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4"><p className="text-[10px] font-semibold text-slate-400">Data and safety note</p><p className="mt-1.5 text-[10px] leading-relaxed text-slate-600">Sensor values and maintenance costs are synthetic demo data. No validated failure probability is available for this machine, and no operational action is automatically approved.</p></section>
+      </aside>
+    </div>
+  </>;
+}
+
+function AssistantPageLegacy({ chat, message, setMessage, onSend, onSchedule }: { chat: {role:"user"|"agent";text:string}[]; message: string; setMessage: (text:string)=>void; onSend: (event:FormEvent<HTMLFormElement>)=>void; onSchedule: ()=>void }) {
   return <><PageHeading eyebrow="Maintenance copilot" title="AI assistant" subtitle="Investigate machine signals and turn predictions into a maintenance plan." action={<span className="flex items-center gap-2 rounded-full border border-emerald-400/15 bg-emerald-400/[0.05] px-3 py-1.5 text-[10px] text-emerald-300"><span className="live-dot"/>AMD AI agent bridge</span>}/><div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_300px]"><section className="panel flex min-h-[560px] flex-col"><div className="panel-heading"><div className="flex items-center gap-3"><div className="agent-avatar"><Bot size={18}/></div><div><h2 className="text-sm font-semibold text-white">ForgeMind maintenance copilot</h2><p className="mt-1 text-[10px] text-slate-500">Context: M17 · Industrial compressor</p></div></div><span className="rounded-full bg-white/[0.04] px-2 py-1 text-[9px] text-slate-500">{import.meta.env.VITE_AGENT_API_URL ? "API mode" : "Demo mode"}</span></div><div className="flex-1 space-y-5 overflow-y-auto p-5">{chat.map((item,index) => item.role === "user" ? <div key={index} className="flex justify-end"><div className="max-w-[80%] rounded-2xl rounded-br-sm bg-emerald-300 px-4 py-3 text-xs leading-relaxed text-[#07110e]">{item.text}</div></div> : <div key={index} className="flex items-start gap-3"><div className="agent-avatar small"><Bot size={14}/></div><div className="max-w-[90%] rounded-2xl rounded-tl-sm border border-white/[0.065] bg-white/[0.025] px-4 py-3.5 text-xs leading-[1.8] text-slate-300">{item.text}{index===0&&<div className="mt-4 rounded-xl border border-emerald-300/10 bg-emerald-300/[0.045] p-3"><p className="text-[9px] font-bold uppercase tracking-[.15em] text-emerald-300">Recommended action</p><p className="mt-1 text-xs font-medium text-slate-200">Schedule maintenance within 48 hours.</p><button className="mt-3 rounded-lg bg-emerald-300 px-3 py-2 text-[10px] font-semibold text-[#07110e] hover:bg-emerald-200" onClick={onSchedule}>Schedule maintenance <ArrowRight size={12} className="ml-1 inline"/></button></div>}</div></div>)}</div><div className="border-t border-white/[0.06] p-4"><div className="mb-3 flex flex-wrap gap-2">{["Why is M17 at high risk?","Check bearing inventory","Estimate downtime cost"].map((prompt) => <button key={prompt} onClick={() => setMessage(prompt)} className="rounded-full border border-white/[0.07] px-3 py-1.5 text-[10px] text-slate-400 transition hover:border-white/15 hover:text-slate-200">{prompt}</button>)}</div><form onSubmit={onSend} className="flex items-center gap-2 rounded-xl border border-white/[0.08] bg-[#0b0f10] p-2"><input value={message} onChange={(e)=>setMessage(e.target.value)} placeholder="Ask about a machine, prediction, or maintenance plan..." className="min-w-0 flex-1 bg-transparent px-2 py-2 text-xs text-slate-200 outline-none placeholder:text-slate-600"/><button className="rounded-lg bg-emerald-300 p-2.5 text-[#07110e] transition hover:bg-emerald-200" type="submit" aria-label="Send message"><Send size={15}/></button></form><p className="mt-2 px-1 text-[9px] text-slate-600">AI recommendations are decision support. Confirm with qualified maintenance staff.</p></div></section><aside className="space-y-4"><section className="panel"><div className="panel-heading"><div><h2 className="text-sm font-semibold text-white">Machine context</h2><p className="mt-1 text-[10px] text-slate-500">Available to the agent</p></div><Cpu size={15} className="text-slate-500"/></div><div className="space-y-3 px-5 pb-5">{[["Asset","M17 · Compressor"],["Health","42% · Critical"],["Failure risk","91% · ~2 days"],["Likely component","Motor bearing"],["Part stock","4 available"]].map(([k,v])=><div key={k} className="flex justify-between gap-3 text-[10px]"><span className="text-slate-500">{k}</span><span className="text-right text-slate-300">{v}</span></div>)}</div></section><section className="panel p-5"><div className="flex items-center gap-2"><Settings2 size={15} className="text-emerald-300"/><h2 className="text-sm font-semibold text-white">Agent tools</h2></div><p className="mt-2 text-[10px] leading-relaxed text-slate-500">Your AMD agent can connect through the API bridge and call the maintenance tools below.</p><div className="mt-4 space-y-2">{["get_machine()","get_sensor_history()","predict_failure()","check_inventory()","calculate_downtime_cost()"].map((tool)=><div key={tool} className="rounded-lg bg-white/[0.025] px-3 py-2 font-mono text-[9px] text-slate-400"><span className="mr-2 text-emerald-300">›</span>{tool}</div>)}</div><div className="mt-4 flex items-center gap-2 text-[9px] text-slate-600"><span className="live-dot"/>{import.meta.env.VITE_AGENT_API_URL ? "API endpoint configured" : "Waiting for VITE_AGENT_API_URL"}</div></section><section className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-4"><p className="text-[10px] font-semibold text-slate-400">Integration contract</p><p className="mt-1.5 text-[10px] leading-relaxed text-slate-600">POST JSON: <code className="text-slate-400">message</code>, <code className="text-slate-400">machineId</code>, and <code className="text-slate-400">context</code>. Return <code className="text-slate-400">response</code> or <code className="text-slate-400">answer</code>.</p></section></aside></div></>;
 }
 
