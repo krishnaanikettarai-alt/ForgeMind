@@ -296,11 +296,6 @@ function App() {
         body: JSON.stringify({
           message: question,
           machineId: selectedMachine,
-          context: {
-            machine: currentMachine,
-            analysis: analysis.data ?? null,
-            analysisStatus: analysis.status,
-          },
         }),
       });
 
