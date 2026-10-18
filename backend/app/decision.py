@@ -1,5 +1,4 @@
-﻿
-"""Deterministic maintenance decision engine.
+﻿"""Deterministic maintenance decision engine.
 
 All prices, stock figures, lead times, and downtime rates are synthetic
 demo values. They are not validated industrial estimates.
@@ -119,7 +118,8 @@ def evaluate_options(data: dict[str, Any] | None = None) -> dict[str, Any]:
                 downtime_cost_inr=_money(downtime_cost),
                 total_cost_inr=_money(part_cost + downtime_cost),
                 lead_time_days=wait_days,
-                stock_available=True,
+                # Supplier availability is not the same as in-stock inventory.
+                stock_available=False,
                 trade_off=(
                     f"Uses {supplier['name']}; estimated lead/wait is "
                     f"{wait_days} days. The cost excludes unquantified "
@@ -161,10 +161,13 @@ def evaluate_options(data: dict[str, Any] | None = None) -> dict[str, Any]:
         )
     )
 
+    # Stock status is descriptive; it must not determine whether a supplier-
+    # backed option can be compared. Exclude options explicitly marked unavailable.
     feasible = [
         option
         for option in options
-        if option.stock_available and option.total_cost_inr >= 0
+        if option.total_cost_inr >= 0
+        and not option.trade_off.startswith("Unavailable:")
     ]
 
     # Rank by immediate cost only. This does not establish operational safety.
