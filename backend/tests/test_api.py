@@ -41,15 +41,15 @@ def test_invalid_machine_id_is_not_joined_to_historical_namespace() -> None:
     assert "Synthetic machine not found" in response.json()["detail"]
 
 
-def test_assistant_contract_and_amd_integration() -> None:
+def test_assistant_contract_and_nvidia_integration() -> None:
     mock_result = {
         "answer": (
             "The available synthetic sensor data requires investigation. "
             "A validated failure probability is unavailable."
         ),
         "machineId": "M17",
-        "model": "DeepSeek-V4-Flash",
-        "provider": "AMD Token Factory",
+        "model": "nvidia/llama-3.3-nemotron-super-49b-v1",
+        "provider": "NVIDIA NIM",
         "tools_used": ["analyze_machine", "get_failure_risk"],
         "status": "completed",
         "data_status": "synthetic_demo",
@@ -71,8 +71,8 @@ def test_assistant_contract_and_amd_integration() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["machineId"] == "M17"
-    assert payload["provider"] == "AMD Token Factory"
-    assert payload["model"] == "DeepSeek-V4-Flash"
+    assert payload["provider"] == "NVIDIA NIM"
+    assert payload["model"] == "nvidia/llama-3.3-nemotron-super-49b-v1"
     assert payload["status"] == "completed"
     assert payload["data_status"] == "synthetic_demo"
     assert payload["requires_human_approval"] is True

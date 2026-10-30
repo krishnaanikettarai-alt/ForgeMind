@@ -9,7 +9,7 @@ from typing import Any
 
 from openai import APIError, APITimeoutError, OpenAI
 
-from .amd_client import get_amd_client, get_amd_model
+from .nvidia_client import get_nvidia_client, get_nvidia_model
 from .analysis import analyze_readings, threshold_config
 from .data import machine_sensor_readings, machine_ids
 from .decision import evaluate_options
@@ -210,7 +210,7 @@ def _response_payload(
         "answer": answer,
         "machineId": machine_id,
         "model": model,
-        "provider": "AMD Token Factory",
+        "provider": "NVIDIA NIM",
         "tools_used": tools_used,
         "status": "completed",
         "data_status": "synthetic_demo",
@@ -225,8 +225,8 @@ def run_maintenance_agent(
     if machine_id not in set(machine_ids()):
         raise ValueError(f"Unknown synthetic machine: {machine_id}")
 
-    client: OpenAI = get_amd_client()
-    model = get_amd_model()
+    client: OpenAI = get_nvidia_client()
+    model = get_nvidia_model()
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -254,7 +254,7 @@ def run_maintenance_agent(
             )
 
             if not response.choices:
-                raise RuntimeError("AMD returned an empty response.")
+                raise RuntimeError("NVIDIA NIM returned an empty response.")
 
             assistant_message = response.choices[0].message
 
@@ -328,7 +328,7 @@ def run_maintenance_agent(
         )
 
         if not final_response.choices:
-            raise RuntimeError("AMD returned an empty final response.")
+            raise RuntimeError("NVIDIA NIM returned an empty final response.")
 
         answer = final_response.choices[0].message.content or (
             "The investigation could not produce a final explanation. "
@@ -343,21 +343,21 @@ def run_maintenance_agent(
         )
 
     except APITimeoutError as exc:
-        logging.exception("AMD Token Factory request timed out.")
+        logging.exception("NVIDIA NIM request timed out.")
         raise RuntimeError(
-            "AMD inference timed out. The provider may be busy; please retry."
+            "NVIDIA NIM inference timed out. The provider may be busy; please retry."
         ) from exc
 
     except APIError as exc:
         status_code = getattr(exc, "status_code", None)
 
         logging.exception(
-            "AMD Token Factory API error. Type: %s; HTTP status: %s",
+            "NVIDIA NIM API error. Type: %s; HTTP status: %s",
             type(exc).__name__,
             status_code,
         )
 
         raise RuntimeError(
-            f"AMD inference failed ({type(exc).__name__}, "
+            f"NVIDIA NIM inference failed ({type(exc).__name__}, "
             f"HTTP status: {status_code}). Check the backend terminal."
         ) from exc

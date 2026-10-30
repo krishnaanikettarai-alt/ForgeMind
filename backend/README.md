@@ -125,9 +125,12 @@ directory containing that file with `FORGEMIND_DATASET_DIR`.
 When unset, only `http://localhost:5173` and `http://127.0.0.1:5173` are
 allowed. Do not use a wildcard origin in production.
 
-The assistant endpoint is intentionally a Phase 1 placeholder. It explicitly
-reports that the AMD-hosted model and ML predictor are not connected and does
-not generate predictions or diagnoses.
+The assistant connects to NVIDIA NIM using the OpenAI-compatible chat
+completions API. Set `NVIDIA_API_KEY` in the repository-root `.env` file and
+select a model available to that key with `FORGEMIND_NVIDIA_MODEL`. For a
+self-hosted NIM endpoint, set `FORGEMIND_NVIDIA_BASE_URL`. The assistant's
+tools can inspect synthetic sensor readings and compare provisional options;
+it does not have a validated failure predictor for synthetic machines.
 
 ## Historical ML baseline
 
